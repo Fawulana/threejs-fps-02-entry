@@ -53,14 +53,12 @@ function buildBody(team) {
   group.traverse((mesh) => {
     if (mesh.isMesh) { mesh.castShadow = true; mesh.receiveShadow = true; }
   });
-  return { group, torso, head, barFg };
+  return { group, torso, head, barFg, legL, legR };
 }
 
 export function createBots(scene, world, rng) {
   const list = [];
   const hitMeshes = [];
-  const tmpA = new THREE.Vector3();
-  const tmpB = new THREE.Vector3();
 
   function makeBot(team, name, index) {
     const body = buildBody(team);
@@ -68,6 +66,7 @@ export function createBots(scene, world, rng) {
     const bot = {
       name, team, index,
       group: body.group, torso: body.torso, head: body.head, barFg: body.barFg,
+      legL: body.legL, legR: body.legR,
       pos: new THREE.Vector3(0, 0, 15),
       velocity: new THREE.Vector3(),
       yaw: 0, health: 100, alive: true,
@@ -78,7 +77,7 @@ export function createBots(scene, world, rng) {
       burstLeft: 0, nextShotAt: 0, burstGapAt: 0,
       strafeDir: 1, strafeAt: 0,
       carrier: false, channel: 0, channelKind: null,
-      fall: 0, heardAt: -99, heardPos: null,
+      fall: 0, heardAt: -99, heardPos: { x: 0, z: 0 }, blindUntil: 0,
       stuckAt: 0, stuckDist: 0, clock: 0,
     };
     body.torso.userData.bot = bot;
@@ -108,6 +107,8 @@ export function createBots(scene, world, rng) {
     bot.fall = 0;
     bot.stuckAt = 0;
     bot.stuckDist = 0;
+    bot.blindUntil = 0;
+    bot.heardAt = -99;
     bot.group.rotation.set(0, yaw, 0);
     bot.group.position.copy(bot.pos);
     bot.group.visible = true;
@@ -164,37 +165,67 @@ export function createBots(scene, world, rng) {
   }
 
   function visibleEnemy(bot, ctx) {
-    // Returns the nearest enemy with line of sight, or null. Checked on a stagger so
-    // nine bots do not raycast on the same frame.
-    const enemies = [];
-    // The player fights for Vanguard, so only Ember bots count the player as an
-    // enemy; Vanguard bots must never target (or shoot) their own teammate.
-    if (ctx.player.alive && bot.team === 'ember') enemies.push({ kind: 'player', ref: ctx.player, pos: tmpA.set(ctx.player.position.x, ctx.player.position.y + 1.2, ctx.player.position.z) });
-    for (const other of list) {
-      if (other.team === bot.team || !other.alive) continue;
-      enemies.push({ kind: 'bot', ref: other, pos: tmpB.set(other.pos.x, other.pos.y + 1.2, other.pos.z) });
-    }
+    // The nearest living enemy with line of sight, or null. Each candidate's
+    // position is read into plain numbers as it is tested, so no two candidates
+    // can share a vector, and a flash-blinded bot sees nothing at all. The sight
+    // check runs through ctx.hasLOS, which smoke clouds also block.
+    if (ctx.isBlinded && ctx.isBlinded(bot)) return null;
+    const eyeY = bot.pos.y + 1.45;
+    const facingX = Math.sin(bot.yaw);
+    const facingZ = Math.cos(bot.yaw);
     let best = null;
     let bestDist = SIGHT_RANGE;
-    for (const enemy of enemies) {
-      const dx = enemy.pos.x - bot.pos.x;
-      const dy = enemy.pos.y - (bot.pos.y + 1.45);
-      const dz = enemy.pos.z - bot.pos.z;
+    for (let i = 0; i <= list.length; i += 1) {
+      let kind;
+      let ref;
+      let ex;
+      let ey;
+      let ez;
+      if (i === 0) {
+        // The player fights for Vanguard, so only Ember bots count the player as
+        // an enemy; Vanguard bots must never target (or shoot) their teammate.
+        if (bot.team !== 'ember' || !ctx.player.alive) continue;
+        kind = 'player';
+        ref = ctx.player;
+        ex = ctx.player.position.x;
+        ey = ctx.player.position.y + 1.2;
+        ez = ctx.player.position.z;
+      } else {
+        const other = list[i - 1];
+        if (other.team === bot.team || !other.alive) continue;
+        kind = 'bot';
+        ref = other;
+        ex = other.pos.x;
+        ey = other.pos.y + 1.2;
+        ez = other.pos.z;
+      }
+      const dx = ex - bot.pos.x;
+      const dy = ey - eyeY;
+      const dz = ez - bot.pos.z;
       const dist = Math.hypot(dx, dy, dz);
       if (dist > bestDist) continue;
-      // Must be roughly in front, unless the bot was just shot from behind.
-      const facingX = Math.sin(bot.yaw);
-      const facingZ = Math.cos(bot.yaw);
+      // Must be roughly in front, unless the bot was just alerted from behind.
       const dot = (dx * facingX + dz * facingZ) / (dist || 1);
       if (dot < -0.15 && ctx.time - bot.heardAt > 1) continue;
-      if (!ctx.hasLOS(bot.pos.x, bot.pos.y + 1.45, bot.pos.z, enemy.pos.x, enemy.pos.y, enemy.pos.z)) continue;
-      best = enemy;
+      if (!ctx.hasLOS(bot.pos.x, eyeY, bot.pos.z, ex, ey, ez)) continue;
+      best = { kind, ref, x: ex, y: ey, z: ez };
       bestDist = dist;
     }
-    if (!best) return null;
-    // Copy the numbers out: best.pos aliases a shared scratch vector that the next
-    // bot's perception overwrites, so a remembered target must own its position.
-    return { kind: best.kind, ref: best.ref, x: best.pos.x, y: best.pos.y, z: best.pos.z };
+    return best;
+  }
+
+  function hearNoise(x, z, radius, sourceTeam, time) {
+    // Gunfire and explosions carry through the yard: bots of the other team
+    // within earshot turn toward the sound and remember the spot to investigate.
+    // The heard position is written into each bot's own persistent vector, so a
+    // burst of fire allocates nothing.
+    for (const bot of list) {
+      if (!bot.alive || bot.team === sourceTeam) continue;
+      if (Math.hypot(bot.pos.x - x, bot.pos.z - z) > radius) continue;
+      bot.heardAt = time;
+      bot.heardPos.x = x;
+      bot.heardPos.z = z;
+    }
   }
 
   function damage(bot, amount, killer, killerName, ctx) {
@@ -205,7 +236,10 @@ export function createBots(scene, world, rng) {
     if (bot.health > 0) {
       // Being shot makes a bot turn toward the shooter and remember the spot.
       bot.heardAt = ctx.time;
-      if (killer === 'player') bot.heardPos = { x: ctx.player.position.x, z: ctx.player.position.z };
+      if (killer === 'player') {
+        bot.heardPos.x = ctx.player.position.x;
+        bot.heardPos.z = ctx.player.position.z;
+      }
       return false;
     }
     bot.alive = false;
@@ -226,6 +260,14 @@ export function createBots(scene, world, rng) {
       return;
     }
     const bomb = ctx.bomb;
+    if (ctx.isBlinded && ctx.isBlinded(bot)) {
+      // Flash-blind: hold still, form no new orders and fire nothing until sight
+      // returns. The think tick is skipped too, so a blinded bot cannot re-plan
+      // around what it cannot see.
+      bot.group.position.copy(bot.pos);
+      bot.group.rotation.set(0, bot.yaw, 0);
+      return;
+    }
     // Periodic thinking: re-perceive, re-path, pick a job.
     if (ctx.time >= bot.thinkAt) {
       bot.thinkAt = ctx.time + 0.18 + rng.range(0, 0.06);
@@ -277,11 +319,17 @@ export function createBots(scene, world, rng) {
           }
         }
       } else if (bomb.state === 'planted') {
-        // Vanguard converges on the planted bomb; the closest bot defuses.
+        // Vanguard converges on the planted bomb; the closest bot defuses, found
+        // with one linear scan instead of a filter-and-sort every think tick.
         const site = world.sites[bomb.site];
         const dist = Math.hypot(bot.pos.x - bomb.x, bot.pos.z - bomb.z);
-        const closest = list.filter((b) => b.team === 'vanguard' && b.alive)
-          .sort((a, b2) => Math.hypot(a.pos.x - bomb.x, a.pos.z - bomb.z) - Math.hypot(b2.pos.x - bomb.x, b2.pos.z - bomb.z))[0];
+        let closest = null;
+        let closestDist = Infinity;
+        for (const mate of list) {
+          if (mate.team !== 'vanguard' || !mate.alive) continue;
+          const mateDist = Math.hypot(mate.pos.x - bomb.x, mate.pos.z - bomb.z);
+          if (mateDist < closestDist) { closestDist = mateDist; closest = mate; }
+        }
         if (closest === bot && dist < 2.4 && !bot.target) bot.state = 'defuse';
         else {
           bot.state = 'patrol';
@@ -301,10 +349,18 @@ export function createBots(scene, world, rng) {
           else setPath(bot, site.x + rng.range(-3, 3), site.z + rng.range(-2, 4));
         }
       }
-      // A shot heard nearby pulls a patrolling bot to investigate.
-      if (bot.state === 'patrol' && bot.heardPos && ctx.time - bot.heardAt < 2.5 && !bot.target) {
+      // Lost sight but remembers where: push to the last seen position instead of
+      // wandering back to a hold, so a bot that saw you comes looking for you.
+      if (!bot.target && bot.lastSeen && ctx.time - bot.lastSeenAt < 6 && bot.state === 'patrol'
+        && ctx.time >= bot.repathAt) {
+        bot.repathAt = ctx.time + 1.5;
+        setPath(bot, bot.lastSeen.x, bot.lastSeen.z);
+      }
+      // A shot heard nearby pulls a patrolling bot to investigate; fresh sound
+      // wins over the older last-seen position, so this runs second.
+      if (bot.state === 'patrol' && ctx.time - bot.heardAt < 2.5 && !bot.target) {
         setPath(bot, bot.heardPos.x, bot.heardPos.z);
-        bot.heardPos = null;
+        bot.heardAt = -99;
       }
     }
 
@@ -372,12 +428,18 @@ export function createBots(scene, world, rng) {
 
     bot.group.position.copy(bot.pos);
     bot.group.rotation.set(0, bot.yaw, 0);
-    // Walk cycle: a small bob and leg swing, so a moving bot reads as moving.
+    // Walk cycle: a small bob and an alternating leg swing, so a moving bot reads
+    // as moving and a holding bot stands still.
     const speed = Math.hypot(bot.velocity.x, bot.velocity.z);
     if (speed > 0.5) {
       const phase = ctx.time * 9;
+      const swing = Math.sin(phase) * 0.55;
+      bot.legL.rotation.x = swing;
+      bot.legR.rotation.x = -swing;
       bot.group.position.y = Math.abs(Math.sin(phase)) * 0.04;
     } else {
+      bot.legL.rotation.x = 0;
+      bot.legR.rotation.x = 0;
       bot.group.position.y = 0;
     }
   }
@@ -387,6 +449,7 @@ export function createBots(scene, world, rng) {
     hitMeshes,
     spawnRound,
     damage,
+    hearNoise,
     step(dt, ctx) {
       for (const bot of list) stepBot(bot, dt, ctx);
     },

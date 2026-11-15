@@ -3,7 +3,7 @@
 // attacks with the bomb — plant it at A or B and it blows in 35 seconds unless Vanguard
 // defuses it — and a round also ends when a team is wiped out or the clock runs out.
 // Money is earned for kills and for winning or losing rounds, and spent in the buy menu.
-import { WEAPONS, GRENADE_PRICE, ARMOR_PRICE } from './weapons.js';
+import { WEAPONS, GRENADE_PRICE, FLASH_PRICE, SMOKE_PRICE, KIT_PRICE, ARMOR_PRICE } from './weapons.js';
 
 const BUY_SECONDS = 12;
 const ROUND_SECONDS = 100;
@@ -34,6 +34,7 @@ export function createRounds(hooks) {
     bombTimer: BOMB_SECONDS,
     plantProgress: 0,
     defuseProgress: 0,
+    hasKit: false,
     matchWinner: null,
     roundReason: '',
   };
@@ -47,6 +48,7 @@ export function createRounds(hooks) {
     state.bombTimer = BOMB_SECONDS;
     state.plantProgress = 0;
     state.defuseProgress = 0;
+    state.hasKit = false;
     const [x, z] = hooks.world.spawns.vanguard[0];
     hooks.resetPlayer(x, z, 0);
     hooks.weapon.refill();
@@ -148,7 +150,50 @@ export function createRounds(hooks) {
     hooks.weapon.state.grenades += 1;
     hooks.audio.buy();
     hooks.hud.setMoney(state.money);
-    hooks.hud.setGrenades(hooks.weapon.state.grenades);
+    hooks.hud.setGrenades(hooks.weapon.state.grenades, hooks.weapon.state.flashes, hooks.weapon.state.smokes);
+    return true;
+  }
+
+  function tryBuyFlash() {
+    if (state.phase !== 'buy') return false;
+    if (hooks.weapon.state.flashes >= 2 || state.money < FLASH_PRICE) {
+      hooks.audio.denied();
+      return false;
+    }
+    state.money -= FLASH_PRICE;
+    hooks.weapon.state.flashes += 1;
+    hooks.audio.buy();
+    hooks.hud.setMoney(state.money);
+    hooks.hud.setGrenades(hooks.weapon.state.grenades, hooks.weapon.state.flashes, hooks.weapon.state.smokes);
+    return true;
+  }
+
+  function tryBuySmoke() {
+    if (state.phase !== 'buy') return false;
+    if (hooks.weapon.state.smokes >= 2 || state.money < SMOKE_PRICE) {
+      hooks.audio.denied();
+      return false;
+    }
+    state.money -= SMOKE_PRICE;
+    hooks.weapon.state.smokes += 1;
+    hooks.audio.buy();
+    hooks.hud.setMoney(state.money);
+    hooks.hud.setGrenades(hooks.weapon.state.grenades, hooks.weapon.state.flashes, hooks.weapon.state.smokes);
+    return true;
+  }
+
+  function tryBuyKit() {
+    // The defuse kit halves the player's defuse channel, from 4 seconds to 2 —
+    // the difference between a defuse and a detonation on a late retake.
+    if (state.phase !== 'buy') return false;
+    if (state.hasKit || state.money < KIT_PRICE) {
+      hooks.audio.denied();
+      return false;
+    }
+    state.money -= KIT_PRICE;
+    state.hasKit = true;
+    hooks.audio.buy();
+    hooks.hud.setMoney(state.money);
     return true;
   }
 
@@ -187,15 +232,17 @@ export function createRounds(hooks) {
     }
   }
 
-  // The player holding E beside the bomb defuses it, channelled over 4 seconds.
+  // The player holding E beside the bomb defuses it, channelled over 4 seconds —
+  // or 2 with the defuse kit bought in the buy menu.
   function playerDefuse(dt, holding) {
     if (state.bomb !== 'planted' || state.phase !== 'live') {
       state.defuseProgress = 0;
       return;
     }
+    const seconds = state.hasKit ? DEFUSE_SECONDS / 2 : DEFUSE_SECONDS;
     const d = Math.hypot(hooks.player.position.x - state.bombX, hooks.player.position.z - state.bombZ);
     if (holding && d < 2.6 && hooks.player.alive) {
-      state.defuseProgress += dt / DEFUSE_SECONDS;
+      state.defuseProgress += dt / seconds;
       hooks.hud.setBomb('planted', state.bombSite, state.bombTimer, state.defuseProgress);
       if (state.defuseProgress >= 1) {
         state.bomb = 'defused';
@@ -273,6 +320,9 @@ export function createRounds(hooks) {
     onPlayerDeath,
     tryBuy,
     tryBuyGrenade,
+    tryBuyFlash,
+    tryBuySmoke,
+    tryBuyKit,
     tryBuyArmor,
     onPlantProgress,
     onDefuseProgress,

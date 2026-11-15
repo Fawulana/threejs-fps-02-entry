@@ -1,16 +1,28 @@
 // The DOM HUD: health, armour, ammo, money, timer, score, team counts, kill feed,
 // banners, the damage flash, the buy menu and the overlay panels. It never touches the
 // simulation; main.js pushes numbers in and reads callbacks out.
-import { WEAPONS, GRENADE_PRICE, ARMOR_PRICE } from './weapons.js';
+import { WEAPONS, GRENADE_PRICE, FLASH_PRICE, SMOKE_PRICE, KIT_PRICE, ARMOR_PRICE } from './weapons.js';
 
 const BUY_ITEMS = [
   { id: 'rifle', label: 'VK-47 Longshot', desc: 'Auto rifle · 30 rounds · high damage' },
   { id: 'smg', label: 'Hornet-9', desc: 'Fast SMG · 32 rounds · close quarters' },
   { id: 'shotgun', label: 'Breacher-12', desc: 'Pump shotgun · 8 pellets · devastating up close' },
   { id: 'sniper', label: 'Longbow .50', desc: 'Bolt sniper · one-shot body · scope on right-click' },
-  { id: 'grenade', label: 'Frag grenade', desc: 'Arcing explosive · 6.5 m blast' },
+  { id: 'grenade', label: 'Frag grenade', desc: 'Arcing explosive · 6.5 m blast · G to throw' },
+  { id: 'flash', label: 'Flashbang', desc: 'Blinds anyone facing the pop · F to throw' },
+  { id: 'smoke', label: 'Smoke grenade', desc: 'Blocks sight for 14 s · H to throw' },
+  { id: 'kit', label: 'Defuse kit', desc: 'Halves your defuse time to 2 seconds' },
   { id: 'armor', label: 'Kevlar vest', desc: 'Absorbs half of every hit' },
 ];
+
+function priceFor(id) {
+  if (id === 'grenade') return GRENADE_PRICE;
+  if (id === 'flash') return FLASH_PRICE;
+  if (id === 'smoke') return SMOKE_PRICE;
+  if (id === 'kit') return KIT_PRICE;
+  if (id === 'armor') return ARMOR_PRICE;
+  return WEAPONS[id].price;
+}
 
 export function createHud() {
   const $ = (id) => document.getElementById(id);
@@ -48,6 +60,8 @@ export function createHud() {
   const defuseBar = $('defuse-bar');
   const defuseFill = $('defuse-fill');
   const interactHint = $('interact-hint');
+  const flashWhite = $('flash-white');
+  const scopeEl = $('scope');
 
   let hitTimer = 0;
   let bannerTimer = 0;
@@ -66,7 +80,7 @@ export function createHud() {
     button.type = 'button';
     button.className = 'buy-item';
     button.dataset.buy = item.id;
-    const price = item.id === 'grenade' ? GRENADE_PRICE : item.id === 'armor' ? ARMOR_PRICE : WEAPONS[item.id].price;
+    const price = priceFor(item.id);
     button.innerHTML = `<b>${item.label}</b><span>$${price.toLocaleString('en-US')}</span><i>${item.desc}</i>`;
     button.addEventListener('click', () => buyHandler && buyHandler(item.id));
     buyGrid.appendChild(button);
@@ -104,8 +118,16 @@ export function createHud() {
       moneyValue.textContent = `$${value.toLocaleString('en-US')}`;
       buyMoney.textContent = `$${value.toLocaleString('en-US')}`;
     },
-    setGrenades(n) {
-      grenadeValue.textContent = `◉ ${n}`;
+    setGrenades(frag, flash, smoke) {
+      grenadeValue.textContent = `◉ ${frag}  ✦ ${flash}  ☁ ${smoke}`;
+    },
+    setFlashLevel(level) {
+      // The flashbang white-out: opacity is driven by the simulation's decay, so
+      // a full-strength flash fades over seconds and a glancing one over a blink.
+      flashWhite.style.opacity = level <= 0.01 ? '0' : String(Math.min(1, level));
+    },
+    setScope(show) {
+      scopeEl.hidden = !show;
     },
     setTimer(seconds, phase) {
       const text = fmtTime(seconds);
@@ -223,7 +245,7 @@ export function createHud() {
       buyMoney.textContent = `$${money.toLocaleString('en-US')}`;
       for (const button of buyGrid.children) {
         const id = button.dataset.buy;
-        const price = id === 'grenade' ? GRENADE_PRICE : id === 'armor' ? ARMOR_PRICE : WEAPONS[id].price;
+        const price = priceFor(id);
         const isOwned = owned.has(id);
         button.classList.toggle('owned', isOwned);
         button.disabled = isOwned || money < price;

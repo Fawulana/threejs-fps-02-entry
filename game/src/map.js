@@ -84,6 +84,28 @@ export function buildMap(scene) {
       metalness: name === 'hairline' || name === 'surface' ? 0.25 : 0.03,
     });
   }
+  // Procedural yard floor: poured-concrete panels with expansion joints, oil stains
+  // and a faded painted centre line, drawn once onto a canvas texture — no image
+  // files, and the same texture reads in the minimap's static layer.
+  const floorCanvas = document.createElement('canvas');
+  floorCanvas.width = 512;
+  floorCanvas.height = 384;
+  const fg = floorCanvas.getContext('2d');
+  fg.fillStyle = PALETTE.floor;
+  fg.fillRect(0, 0, 512, 384);
+  fg.strokeStyle = 'rgba(0,0,0,0.35)';
+  fg.lineWidth = 2;
+  for (let gx = 0; gx <= 512; gx += 64) { fg.beginPath(); fg.moveTo(gx, 0); fg.lineTo(gx, 384); fg.stroke(); }
+  for (let gz = 0; gz <= 384; gz += 64) { fg.beginPath(); fg.moveTo(0, gz); fg.lineTo(512, gz); fg.stroke(); }
+  fg.fillStyle = 'rgba(0,0,0,0.18)';
+  for (const stain of [[120, 90, 26], [390, 260, 34], [250, 300, 20], [60, 300, 16], [430, 80, 18]]) {
+    fg.beginPath(); fg.arc(stain[0], stain[1], stain[2], 0, Math.PI * 2); fg.fill();
+  }
+  fg.fillStyle = 'rgba(240,168,48,0.45)';
+  fg.fillRect(250, 0, 4, 384);
+  const floorTexture = new THREE.CanvasTexture(floorCanvas);
+  floorTexture.colorSpace = THREE.SRGBColorSpace;
+  materials.floor.map = floorTexture;
   const colliders = [];
   const shootables = [];
   const flat = []; // 2D boxes for the nav test: {minX, maxX, minZ, maxZ, top}
@@ -101,6 +123,51 @@ export function buildMap(scene) {
     return mesh;
   }
   for (const entry of BOXES) box(entry[0], entry[1], entry[2], entry[3], entry[4], entry[5], entry[6]);
+
+  // Fuel drums: cylinders with box colliders, low cover that breaks up the west and
+  // east lanes. They register in flat[] before the waypoint graph is built, so the
+  // nav links route around them like every other box.
+  const drumGeo = new THREE.CylinderGeometry(0.45, 0.45, 1.1, 14);
+  const drumMat = new THREE.MeshStandardMaterial({ color: new THREE.Color('#7a4a22'), roughness: 0.7, metalness: 0.3 });
+  for (const drum of [[-10.5, 4.5], [10.5, 4.5], [-16, 4], [16, 4], [0, -6.5]]) {
+    const mesh = new THREE.Mesh(drumGeo, drumMat);
+    mesh.position.set(drum[0], 0.55, drum[1]);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+    colliders.push(new THREE.Box3(
+      new THREE.Vector3(drum[0] - 0.45, 0, drum[1] - 0.45),
+      new THREE.Vector3(drum[0] + 0.45, 1.1, drum[1] + 0.45),
+    ));
+    shootables.push(mesh);
+    flat.push({ minX: drum[0] - 0.45, maxX: drum[0] + 0.45, minZ: drum[1] - 0.45, maxZ: drum[1] + 0.45, top: 1.1 });
+  }
+  // Stacked crates guarding the south crossings: two high, so they block sight as
+  // well as movement.
+  box(-6, 10, 1.4, 1.4, 1.1, 'hairline', 0.55);
+  box(-6, 10, 1.2, 1.2, 1.0, 'surface', 1.6);
+  box(6, 10, 1.4, 1.4, 1.1, 'hairline', 0.55);
+  box(6, 10, 1.2, 1.2, 1.0, 'surface', 1.6);
+
+  // Distant yard silhouettes beyond the walls — silos, a crane mast and an overhead
+  // gantry beam. Visual only: they sit outside the playable box, carry no colliders
+  // and never enter the nav test, so they cannot trap a bot.
+  const silhouette = new THREE.MeshStandardMaterial({ color: new THREE.Color('#141a22'), roughness: 1 });
+  const siloGeo = new THREE.CylinderGeometry(2.2, 2.2, 11, 16);
+  for (const silo of [[-31, -20], [29, -24], [-33, 8]]) {
+    const mesh = new THREE.Mesh(siloGeo, silhouette);
+    mesh.position.set(silo[0], 5.5, silo[1]);
+    group.add(mesh);
+  }
+  const mast = new THREE.Mesh(new THREE.BoxGeometry(1.4, 16, 1.4), silhouette);
+  mast.position.set(30, 8, 10);
+  group.add(mast);
+  const jib = new THREE.Mesh(new THREE.BoxGeometry(16, 1, 1), silhouette);
+  jib.position.set(24, 15.5, 10);
+  group.add(jib);
+  const gantry = new THREE.Mesh(new THREE.BoxGeometry(50, 0.8, 1.6), silhouette);
+  gantry.position.set(0, 6.4, -16.5);
+  group.add(gantry);
 
   // Site letters: big painted A and B floating over each site, plus yard signage.
   function sign(text, colour, x, y, z, w = 6, h = 3) {
@@ -265,6 +332,7 @@ export function buildMap(scene) {
   return {
     colliders,
     shootables,
+    walls: flat,
     group,
     nodes,
     nearestNode,

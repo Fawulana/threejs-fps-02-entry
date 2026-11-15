@@ -33,6 +33,9 @@ export const WEAPONS = {
 };
 
 export const GRENADE_PRICE = 300;
+export const FLASH_PRICE = 200;
+export const SMOKE_PRICE = 300;
+export const KIT_PRICE = 400;
 export const ARMOR_PRICE = 650;
 const MUZZLE_TIME = 0.06;
 
@@ -91,8 +94,8 @@ export function createWeapon(camera) {
   for (const def of Object.values(WEAPONS)) ammo[def.id] = { mag: def.mag, reserve: def.reserve };
   const ownedSet = new Set(['pistol']);
   const state = {
-    current: 'pistol', cooldown: 0, reloadLeft: 0, flash: 0, kick: 0,
-    grenades: 0, zoomed: false,
+    current: 'pistol', cooldown: 0, reloadLeft: 0, flash: 0, kick: 0, bloom: 0,
+    grenades: 0, flashes: 0, smokes: 0, zoomed: false,
   };
 
   function activeModel() {
@@ -101,6 +104,9 @@ export function createWeapon(camera) {
 
   function step(dt, aiming) {
     state.cooldown = Math.max(0, state.cooldown - dt);
+    // Bloom from sustained fire bleeds off over about half a second of not firing,
+    // so burst fire stays accurate and holding the trigger does not.
+    state.bloom = Math.max(0, state.bloom - dt * 0.055);
     state.flash = Math.max(0, state.flash - dt);
     state.kick += (0 - state.kick) * Math.min(1, dt * 14);
     const model = activeModel();
@@ -142,6 +148,7 @@ export function createWeapon(camera) {
       state.cooldown = WEAPONS[state.current].fireGap;
       state.flash = MUZZLE_TIME;
       state.kick = WEAPONS[state.current].kick;
+      state.bloom = Math.min(0.032, state.bloom + 0.005 + WEAPONS[state.current].kick * 0.18);
     },
     takeRound() {
       const slot = ammo[state.current];
@@ -155,9 +162,14 @@ export function createWeapon(camera) {
       if (state.reloadLeft > 0 || slot.mag === def.mag || slot.reserve === 0) return;
       state.reloadLeft = def.reloadTime;
     },
-    spread(speed) {
+    spread(speed, crouched, airborne) {
+      // Still and crouched is the accurate stance; moving, jumping and sustained
+      // fire each widen the cone, so stopping to aim pays.
       const def = WEAPONS[state.current];
-      return def.spreadStill + Math.min(1, speed / 5.4) * def.spreadMove;
+      let value = def.spreadStill + Math.min(1, speed / 5.4) * def.spreadMove + state.bloom;
+      if (crouched) value *= 0.7;
+      if (airborne) value += 0.02;
+      return value;
     },
     switchTo(id) {
       if (!WEAPONS[id] || id === state.current) return false;
@@ -167,6 +179,11 @@ export function createWeapon(camera) {
       state.reloadLeft = 0;
       models[id].visible = true;
       return true;
+    },
+    setModelHidden(hidden) {
+      // Scoped: the view model would fill the scope's circle, so it hides while
+      // the sniper's scope overlay is up and returns the moment it drops.
+      models[state.current].visible = !hidden;
     },
     buy(id) {
       ownedSet.add(id);
@@ -190,7 +207,10 @@ export function createWeapon(camera) {
       state.reloadLeft = 0;
       state.flash = 0;
       state.kick = 0;
+      state.bloom = 0;
       state.grenades = 0;
+      state.flashes = 0;
+      state.smokes = 0;
     },
     owned(id) {
       return ownedSet.has(id);

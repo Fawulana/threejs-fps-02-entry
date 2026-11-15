@@ -11,6 +11,8 @@ import { createInput } from './input.js';
 import { createWeapon, WEAPONS } from './weapons.js';
 import { createBots } from './bots.js';
 import { createCombat } from './combat.js';
+import { createGrenades } from './grenades.js';
+import { createMinimap } from './minimap.js';
 import { createRounds } from './rounds.js';
 import { createHud } from './hud.js';
 
@@ -77,6 +79,15 @@ bombMesh.add(bombBody, bombLight);
 bombMesh.visible = false;
 scene.add(bombMesh);
 
+// Sight runs through one wrapper: walls (the combat raycast) and smoke clouds
+// (the grenade module) both block it, so bot perception, flash checks and the
+// minimap's enemy dots all agree on what is visible.
+let grenades = null;
+function hasSight(x1, y1, z1, x2, y2, z2) {
+  if (grenades && grenades.blocksSight(x1, y1, z1, x2, y2, z2)) return false;
+  return combat.hasLOS(x1, y1, z1, x2, y2, z2);
+}
+
 // The context the bots read every step: the player, the bomb, line of sight, and the
 // callbacks that let them shoot, plant and defuse. It is built once and read live.
 const bombView = { state: 'none', site: 'A', x: 0, z: 0 };
@@ -85,7 +96,8 @@ const botCtx = {
   player: body,
   playerSpeed: 0,
   bomb: bombView,
-  hasLOS: (x1, y1, z1, x2, y2, z2) => combat.hasLOS(x1, y1, z1, x2, y2, z2),
+  hasLOS: hasSight,
+  isBlinded: (bot) => grenades !== null && grenades.isBlinded(bot),
   moveBody: (pos, vel, wx, wz, speed, dt) => player.moveBody(pos, vel, wx, wz, speed, dt),
   botShot: (bot, tx, ty, tz, error, def) => combat.botShot(bot, tx, ty, tz, error, def),
   onBotKilled: (bot, killer, killerName) => onBotKilled(bot, killer, killerName),
@@ -100,7 +112,36 @@ const combat = createCombat(scene, world, rng, {
   damagePlayer: (amount, from) => damagePlayer(amount, from),
   onBotShot: (dist) => { if (dist < 16) audio.shot('rifle'); else audio.distantShot(); },
   onGrenadeThrow: () => audio.grenadePin(),
-  onExplosion: () => audio.explosion(),
+  onExplosion: (p) => {
+    audio.explosion();
+    if (p) bots.hearNoise(p.x, p.z, 30, 'vanguard', elapsed);
+  },
+});
+
+grenades = createGrenades(scene, world, {
+  player: body,
+  bots,
+  hasLOS: hasSight,
+  onPin: () => audio.grenadePin(),
+  onPop: () => { audio.shot('sniper'); audio.flashRing(); },
+  onHiss: () => audio.smokeHiss(),
+  onNoise: (x, z, radius) => bots.hearNoise(x, z, radius, 'vanguard', elapsed),
+  onPlayerFlash: (strength) => { flashLevel = Math.max(flashLevel, strength); },
+});
+
+const minimap = createMinimap(document.getElementById('minimap'), world, {
+  player: body,
+  bots,
+  bomb: bombView,
+  smoke: grenades.clouds,
+  seesEnemy: (bot) => {
+    // An enemy dot appears only while the player has a live line of sight to them.
+    if (!body.alive) return false;
+    const dx = bot.pos.x - body.position.x;
+    const dz = bot.pos.z - body.position.z;
+    if (dx * dx + dz * dz > 35 * 35) return false;
+    return hasSight(body.position.x, body.position.y + body.eye, body.position.z, bot.pos.x, bot.pos.y + 1.2, bot.pos.z);
+  },
 });
 
 const cameraDir = new THREE.Vector3();
@@ -112,7 +153,9 @@ let elapsed = 0;
 let frozen = false;
 let started = false;
 let buyOpen = false;
-let lastWeapon = 'pistol';
+let flashLevel = 0;
+let mapTimer = 0;
+let prevPhase = 'menu';
 let accumulator = 0;
 let lastTime = performance.now();
 const damageLog = [];
@@ -179,6 +222,25 @@ function syncCamera() {
   camera.rotation.set(body.pitch, body.yaw, 0, 'YXZ');
 }
 
+const BASE_FOV = 74;
+let currentFov = BASE_FOV;
+function updateOptics() {
+  // Aiming narrows the field of view by the weapon's zoom factor — the sniper's
+  // 3.2x scope is a real scope, with its overlay ring and the view model hidden
+  // while scoped. Every other weapon gets its own smaller zoom.
+  const aiming = input.state.aiming && body.alive && rounds.state.phase !== 'menu';
+  const def = weapon.def();
+  const scoped = aiming && def.id === 'sniper';
+  const targetFov = aiming ? BASE_FOV / def.zoom : BASE_FOV;
+  currentFov += (targetFov - currentFov) * 0.35;
+  if (Math.abs(currentFov - camera.fov) > 0.05) {
+    camera.fov = currentFov;
+    camera.updateProjectionMatrix();
+  }
+  hud.setScope(scoped);
+  weapon.setModelHidden(scoped);
+}
+
 function aimAt(point) {
   const dx = point.x - body.position.x;
   const dy = point.y - (body.position.y + body.eye);
@@ -202,13 +264,14 @@ function shootPlayer() {
     .addScaledVector(cameraDir, 0.5)
     .addScaledVector(rightV, 0.24)
     .addScaledVector(upV, -0.15);
-  const spread = weapon.spread(player.groundSpeed()) * (input.state.aiming ? 0.45 : 1);
+  const spread = weapon.spread(player.groundSpeed(), body.crouching, !body.onGround) * (input.state.aiming ? 0.45 : 1);
   const results = combat.shootPlayer(camera.position, cameraDir, def, spread, muzzle);
   let hitHead = false;
   for (const r of results) if (r.head) hitHead = true;
   if (hitHead) hud.hitMarker(false, 90);
   weapon.pullTrigger();
   audio.shot(def.id);
+  bots.hearNoise(body.position.x, body.position.z, 20, 'vanguard', elapsed);
   player.recoil(0.009 + def.kick * 0.4 + rng.next() * 0.004, (rng.next() * 2 - 1) * 0.004);
   hud.setAmmo(weapon.ammo[weapon.state.current].mag, weapon.ammo[weapon.state.current].reserve);
   hud.setCrosshairSpread(4 + spread * 900);
@@ -229,6 +292,7 @@ function toggleBuy(open) {
 function ownedSet() {
   const owned = new Set();
   for (const id of Object.keys(WEAPONS)) if (weapon.owned(id)) owned.add(id);
+  if (rounds.state.hasKit) owned.add('kit');
   return owned;
 }
 
@@ -264,22 +328,44 @@ function onLockChange(locked) {
 hud.onPlay(onPlayClick);
 hud.onBuy((id) => {
   if (id === 'grenade') rounds.tryBuyGrenade();
+  else if (id === 'flash') rounds.tryBuyFlash();
+  else if (id === 'smoke') rounds.tryBuySmoke();
+  else if (id === 'kit') rounds.tryBuyKit();
   else if (id === 'armor') rounds.tryBuyArmor();
   else rounds.tryBuy(id);
   hud.showBuy(true, rounds.state.money, ownedSet());
 });
 document.getElementById('buy-close').addEventListener('click', () => toggleBuy(false));
 
+function throwFromHand(kind) {
+  // One throw path for all three grenade types: frags fly from combat, flashes
+  // and smoke from the grenade module, and the HUD counts all three.
+  if (rounds.state.phase !== 'live' || !body.alive) return;
+  const ws = weapon.state;
+  if (kind === 'frag' && ws.grenades <= 0) return;
+  if (kind === 'flash' && ws.flashes <= 0) return;
+  if (kind === 'smoke' && ws.smokes <= 0) return;
+  camera.getWorldDirection(cameraDir);
+  if (kind === 'frag') {
+    ws.grenades -= 1;
+    combat.throwGrenade(camera.position, cameraDir);
+  } else if (kind === 'flash') {
+    ws.flashes -= 1;
+    grenades.throwFlash(camera.position, cameraDir);
+  } else {
+    ws.smokes -= 1;
+    grenades.throwSmoke(camera.position, cameraDir);
+  }
+  hud.setGrenades(ws.grenades, ws.flashes, ws.smokes);
+}
+
 function handlePressed(pressed) {
   for (const code of pressed) {
     if (code === 'KeyR') weapon.reload();
     if (code === 'KeyB') toggleBuy(!buyOpen);
-    if (code === 'KeyG' && weapon.state.grenades > 0 && rounds.state.phase === 'live' && body.alive) {
-      camera.getWorldDirection(cameraDir);
-      weapon.state.grenades -= 1;
-      hud.setGrenades(weapon.state.grenades);
-      combat.throwGrenade(camera.position, cameraDir);
-    }
+    if (code === 'KeyG') throwFromHand('frag');
+    if (code === 'KeyF') throwFromHand('flash');
+    if (code === 'KeyH') throwFromHand('smoke');
     if (code.startsWith('Digit')) {
       const slot = ['pistol', 'rifle', 'smg', 'shotgun', 'sniper'][Number(code.slice(5)) - 1];
       if (slot && weapon.owned(slot) && rounds.state.phase !== 'menu') {
@@ -305,12 +391,34 @@ function step(dt) {
   if (phase === 'buy' || phase === 'live') {
     if (body.alive) player.step(dt, input.state.keys, input.state.aiming);
     weapon.step(dt, input.state.aiming);
+    // The crosshair tracks the live spread every step, so moving, jumping and
+    // sustained fire visibly widen it before the next shot, not after.
+    hud.setCrosshairSpread(4 + weapon.spread(player.groundSpeed(), body.crouching, !body.onGround) * (input.state.aiming ? 0.45 : 1) * 900);
   }
   if (phase === 'live') {
     bots.step(dt, botCtx);
   }
   combat.step(dt);
+  grenades.step(dt);
   rounds.step(dt);
+
+  // Entering a buy phase starts a fresh round: lingering smoke and live
+  // canisters are cleared, and the flash white-out never carries over either.
+  if (rounds.state.phase === 'buy' && prevPhase !== 'buy') grenades.clear();
+  prevPhase = rounds.state.phase;
+
+  // The flashbang white-out fades over a couple of seconds of simulation time.
+  if (flashLevel > 0) {
+    flashLevel = Math.max(0, flashLevel - dt * 0.45);
+    hud.setFlashLevel(flashLevel);
+  }
+
+  // The minimap refreshes four times a second from the simulation, never per frame.
+  mapTimer += dt;
+  if (mapTimer >= 0.25) {
+    mapTimer = 0;
+    minimap.draw();
+  }
 
   // The bomb mesh follows its carrier, then sits on the ground once planted.
   if (rounds.state.bomb === 'carried') {
@@ -361,6 +469,7 @@ function frame(now) {
     }
     if (accumulator > FIXED_STEP * 5) accumulator = 0;
     syncCamera();
+    updateOptics();
   }
   renderer.render(scene, camera);
 }
@@ -410,6 +519,9 @@ function runShot(name) {
     body.pitch = 0;
     rounds.state.money = 4200;
     hud.setMoney(4200);
+    weapon.state.grenades = 1;
+    weapon.state.flashes = 1;
+    weapon.state.smokes = 1;
     settle(10);
     hud.showBuy(true, 4200, ownedSet());
   } else if (name === 'play' || name === 'end') {
@@ -431,11 +543,32 @@ function runShot(name) {
     stageBot(vang[1], 5, 6, 0);
     settle(24);
     if (name === 'play') {
-      // One aimed shot at the bot ahead: tracer, muzzle flash and hit marker in frame.
-      aimAt(new THREE.Vector3(-2.5, 1.2, -3));
+      // A smoke grenade blooms ahead first, so the frame shows the cloud, the
+      // minimap, the bots and the tracer together; then one aimed shot.
+      weapon.state.grenades = 1;
+      weapon.state.flashes = 1;
+      weapon.state.smokes = 1;
+      grenades.throwSmoke(new THREE.Vector3(-6, 1.6, 0), new THREE.Vector3(0.45, 0.15, -0.88).normalize());
+      settle(78);
+      // Re-stage the bots after the smoke blooms: the live simulation moved them
+      // while the cloud formed, and the shot wants them back in the lane.
+      stageBot(ember[0], -2.5, -3, Math.PI);
+      stageBot(ember[1], 3.5, -7, Math.PI);
+      stageBot(ember[2], 6, 2, Math.PI * 0.75);
+      stageBot(vang[0], -5, 3, 0);
+      stageBot(vang[1], 5, 6, 0);
+      settle(2);
+      // The aim point sits slightly left and high of the bot's chest: the ray
+      // leaves the muzzle offset right and low of the camera, so aiming dead
+      // centre would send it past the torso's edge. The matrix update mirrors
+      // what the render loop does every frame: no frame has rendered yet in the
+      // staged capture, so the bots' world matrices are still stale and the
+      // raycast would test their meshes at the origin.
+      scene.updateMatrixWorld(true);
+      aimAt(new THREE.Vector3(-2.7, 1.1, -3.2));
       shootPlayer();
       settle(2);
-      aimAt(new THREE.Vector3(-2.5, 1.2, -3));
+      aimAt(new THREE.Vector3(-2.7, 1.1, -3.2));
     } else {
       // Round over: Ember wiped out, Vanguard ahead 3–2, banner up. The score is set
       // to 2 first because the elimination check adds the winning point during settle.
@@ -460,8 +593,9 @@ function runShot(name) {
   hud.setHealth(body.health, body.armor);
   hud.setMoney(rounds.state.money);
   hud.setWeapon(weapon.def().name);
-  hud.setGrenades(weapon.state.grenades);
+  hud.setGrenades(weapon.state.grenades, weapon.state.flashes, weapon.state.smokes);
   hud.setAlive(bots.aliveCount('vanguard') + (body.alive ? 1 : 0), bots.aliveCount('ember'));
+  minimap.draw();
   paintTwiceThenReady();
 }
 
@@ -482,6 +616,7 @@ window.__dustline = {
       money: rounds.state.money,
       timer: Math.round(rounds.state.timer * 10) / 10,
       bomb: rounds.state.bomb,
+      fov: Math.round(camera.fov * 10) / 10,
       player: {
         x: Math.round(body.position.x * 100) / 100,
         z: Math.round(body.position.z * 100) / 100,
@@ -489,6 +624,11 @@ window.__dustline = {
         alive: body.alive,
         weapon: weapon.state.current,
         mag: weapon.ammo[weapon.state.current].mag,
+        frag: weapon.state.grenades,
+        flash: weapon.state.flashes,
+        smoke: weapon.state.smokes,
+        kit: rounds.state.hasKit,
+        blind: flashLevel > 0,
       },
       bots: bots.list.map((b) => ({
         name: b.name, team: b.team, alive: b.alive,

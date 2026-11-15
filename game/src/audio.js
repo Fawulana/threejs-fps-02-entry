@@ -138,5 +138,14 @@ export function createAudio() {
       if (!ensure()) return;
       tone(now(), 1900, 1200, 0.06, 0.2, 'square');
     },
+    flashRing() {
+      // The flashbang's aftermath: a high ringing tone that fades over two seconds.
+      if (!ensure()) return;
+      tone(now(), 3400, 3200, 2.0, 0.16, 'sine');
+    },
+    smokeHiss() {
+      if (!ensure()) return;
+      noise(now(), 0.9, 5200, 0.22, 'highpass');
+    },
   };
 }

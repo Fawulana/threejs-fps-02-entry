@@ -14,7 +14,3 @@ export const PALETTE = {
   danger: '#e5484d',
   money: '#7fd08a',
 };
-
-export function shade(name) {
-  return PALETTE[name];
-}

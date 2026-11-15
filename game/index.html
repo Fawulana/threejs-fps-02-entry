@@ -63,6 +63,25 @@
   }
   #damage-flash.on { opacity: 1; }
 
+  /* Flashbang white-out: opacity is driven by the simulation's decay. */
+  #flash-white { position: fixed; inset: 0; background: #fff8e6; opacity: 0; pointer-events: none; }
+
+  /* Sniper scope: a clear circle with cross lines, the rest of the view darkened. */
+  #scope { position: fixed; inset: 0; pointer-events: none; }
+  #scope .ring {
+    position: absolute; left: 50%; top: 50%; width: 56vmin; height: 56vmin;
+    transform: translate(-50%, -50%); border: 2px solid rgba(236, 231, 219, .8); border-radius: 50%;
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, .72);
+  }
+  #scope .ring::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgba(236, 231, 219, .8); }
+  #scope .ring::after { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 1px; background: rgba(236, 231, 219, .8); }
+
+  /* Tactical minimap: walls, sites, teammates, the planted bomb and smoke. */
+  #minimap {
+    position: fixed; top: 64px; left: 20px; width: 176px; height: 140px;
+    border: 1px solid var(--hairline); border-radius: var(--radius-panel); background: #10141a;
+  }
+
   /* Top bar: round, timer, score, team counts. */
   #topbar {
     position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
@@ -197,6 +216,8 @@
 
 <div id="hud" aria-hidden="true">
   <div id="damage-flash"></div>
+  <div id="flash-white"></div>
+  <div id="scope" hidden><div class="ring"></div></div>
   <div id="crosshair"><i></i><i></i><i></i><i></i></div>
   <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
 
@@ -207,6 +228,7 @@
   </div>
 
   <div id="bomb-status" hidden>EMBER CARRIES THE BOMB</div>
+  <canvas id="minimap" width="176" height="140"></canvas>
   <div id="killfeed"></div>
 
   <div id="vitals">
@@ -237,7 +259,7 @@
     <ul class="keys">
       <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move &nbsp; <kbd>Mouse</kbd> Look</li>
       <li><kbd>Click</kbd> Fire &nbsp; <kbd>R</kbd> Reload &nbsp; <kbd>Right-click</kbd> Aim</li>
-      <li><kbd>1</kbd>–<kbd>5</kbd> Weapons &nbsp; <kbd>G</kbd> Grenade &nbsp; <kbd>E</kbd> Defuse</li>
+      <li><kbd>1</kbd>–<kbd>5</kbd> Weapons &nbsp; <kbd>G</kbd> Frag &nbsp; <kbd>F</kbd> Flash &nbsp; <kbd>H</kbd> Smoke &nbsp; <kbd>E</kbd> Defuse</li>
       <li><kbd>B</kbd> Buy menu &nbsp; <kbd>Ctrl</kbd> Crouch &nbsp; <kbd>Space</kbd> Jump</li>
     </ul>
   </section>

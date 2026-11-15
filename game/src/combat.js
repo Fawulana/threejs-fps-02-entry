@@ -16,6 +16,9 @@ export function createCombat(scene, world, rng, hooks) {
   const origin = new THREE.Vector3();
   const direction = new THREE.Vector3();
   const tmp = new THREE.Vector3();
+  const hitNormal = new THREE.Vector3();
+  const markTarget = new THREE.Vector3();
+  const nextPos = new THREE.Vector3();
   const up = new THREE.Vector3(0, 1, 0);
 
   // The player's hitbox: an invisible box the raycaster can hit, kept on the player.
@@ -25,6 +28,11 @@ export function createCombat(scene, world, rng, hooks) {
   );
   playerHitbox.userData.player = true;
   scene.add(playerHitbox);
+
+  // The raycast target list is built once: the world's shootables, the bots' hit
+  // meshes and the player's hitbox never change after setup, so resolving a shot
+  // must not concatenate a fresh array for every bullet.
+  const targets = world.shootables.concat(hooks.bots.hitMeshes, [playerHitbox]);
 
   // Tracer pool: stretched additive boxes, one per shot, fading in 80 ms.
   const tracers = [];
@@ -104,7 +112,8 @@ export function createCombat(scene, world, rng, hooks) {
     impact.spark.position.copy(point);
     impact.spark.visible = true;
     impact.mark.position.copy(point).addScaledVector(normal, 0.01);
-    impact.mark.lookAt(point.clone().add(normal));
+    markTarget.copy(point).add(normal);
+    impact.mark.lookAt(markTarget);
     impact.mark.visible = true;
     impact.life = 4;
     impact.spark.material.opacity = 1;
@@ -114,38 +123,39 @@ export function createCombat(scene, world, rng, hooks) {
   function resolveShot(from, dir, def, shooterTeam, maxDist, shooterName) {
     raycaster.set(from, dir);
     raycaster.far = maxDist;
-    const targets = world.shootables.concat(hooks.bots.hitMeshes, playerHitbox);
     const hit = raycaster.intersectObjects(targets, false)[0];
     const end = hit ? hit.point : tmp.copy(from).addScaledVector(dir, maxDist);
     showTracer(from, end);
     if (!hit) return { hit: false };
-    const result = { hit: true, point: hit.point.clone(), normal: hit.face ? hit.face.normal.clone() : up.clone() };
+    // The hit point and normal are read straight off the intersection and copied
+    // into scratch storage where they are needed; nothing here clones a vector.
+    hitNormal.copy(hit.face ? hit.face.normal : up);
     if (hit.object.userData.bot) {
       const bot = hit.object.userData.bot;
-      if (!bot.alive || bot.team === shooterTeam) return { ...result, blocked: true };
+      if (!bot.alive || bot.team === shooterTeam) return { hit: true, blocked: true };
       const dist = hit.distance;
       const falloff = Math.max(0.55, 1 - dist / (def.range * 2));
       const head = hit.object.userData.part === 'head';
       const amount = Math.round(def.damage * (head ? def.headMult : 1) * falloff);
       const killed = hooks.damageBot(bot, amount, shooterTeam === 'player' ? 'player' : 'bot', shooterName);
-      showImpact(hit.point, result.normal);
-      return { ...result, bot, head, amount, killed };
+      showImpact(hit.point, hitNormal);
+      return { hit: true, bot, head, amount, killed };
     }
     if (hit.object.userData.player) {
       // Only Ember fire can hurt the player: a Vanguard bot's stray round and the
       // player's own muzzle can never register on their own hitbox.
-      if (shooterTeam !== 'ember') return { ...result, blocked: true };
-      if (!hooks.player.alive) return { ...result, blocked: true };
+      if (shooterTeam !== 'ember') return { hit: true, blocked: true };
+      if (!hooks.player.alive) return { hit: true, blocked: true };
       const dist = hit.distance;
       const falloff = Math.max(0.55, 1 - dist / (def.range * 2));
       const head = hit.point.y > hooks.player.position.y + 1.35;
       const amount = Math.round(def.damage * (head ? def.headMult : 1) * falloff);
       hooks.damagePlayer(amount, from);
-      showImpact(hit.point, result.normal);
-      return { ...result, player: true, head, amount };
+      showImpact(hit.point, hitNormal);
+      return { hit: true, player: true, head, amount };
     }
-    showImpact(hit.point, result.normal);
-    return { ...result, wall: true };
+    showImpact(hit.point, hitNormal);
+    return { hit: true, wall: true };
   }
 
   function shootPlayer(from, dir, def, spread, muzzle) {
@@ -204,7 +214,7 @@ export function createCombat(scene, world, rng, hooks) {
     blastLight.position.copy(p);
     blastLight.intensity = 60;
     blastLife = 0.35;
-    hooks.onExplosion();
+    hooks.onExplosion(p);
     // Damage falls off with distance; the thrower is not spared.
     for (const bot of hooks.bots.list) {
       if (!bot.alive) continue;
@@ -222,7 +232,7 @@ export function createCombat(scene, world, rng, hooks) {
       const g = grenades[i];
       g.fuse -= dt;
       g.velocity.y -= 13 * dt;
-      const next = g.mesh.position.clone().addScaledVector(g.velocity, dt);
+      const next = nextPos.copy(g.mesh.position).addScaledVector(g.velocity, dt);
       // Bounce off the world: test the next position against every collider.
       let bounced = false;
       for (const box of world.colliders) {
