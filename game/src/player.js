@@ -1,6 +1,6 @@
-// Player movement: acceleration, friction, gravity, crouch and jump, resolved as a box
-// against the world's colliders one axis at a time, so a wall never swallows the player.
-// It also owns health and armour: armour absorbs half of every hit until it breaks.
+// Player movement: acceleration, friction, gravity, crouch and jump, resolved as a
+// box against the world's colliders one axis at a time. Armour absorbs half of every
+// hit until it breaks.
 import * as THREE from 'three';
 
 const RADIUS = 0.34;
@@ -34,7 +34,7 @@ export function createPlayer(colliders) {
   const probe = new THREE.Box3();
   const wish = new THREE.Vector3();
 
-  // lift keeps the feet and the crown out of the horizontal tests, so standing on the
+  // lift keeps the feet and crown out of the horizontal tests, so standing on the
   // floor is not read as walking into a wall.
   function overlaps(x, y, z, height, lift) {
     probe.min.set(x - RADIUS, y + lift, z - RADIUS);
@@ -116,8 +116,7 @@ export function createPlayer(colliders) {
     player.velocity.y = Math.max(-30, player.velocity.y);
   }
 
-  // Move a bot the same way, on the ground plane: steer velocity toward a wish direction
-  // and resolve the same axis-by-axis collision. Returns the horizontal speed reached.
+  // Move a bot the same way, on the ground plane. Returns the speed reached.
   function moveBody(position, velocity, wishX, wishZ, speed, dt) {
     const blend = Math.min(1, GROUND_ACCEL * dt / speed);
     velocity.x += (wishX * speed - velocity.x) * blend;

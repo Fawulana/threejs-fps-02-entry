@@ -1,8 +1,7 @@
-// Rounds, money and the bomb: the tactical skeleton. A match is first to 8 rounds.
-// Each round opens with a 12-second buy phase, then 100 seconds of live play. Ember
-// attacks with the bomb — plant it at A or B and it blows in 35 seconds unless Vanguard
-// defuses it — and a round also ends when a team is wiped out or the clock runs out.
-// Money is earned for kills and for winning or losing rounds, and spent in the buy menu.
+// Rounds, money and the bomb. A match is first to 8 (overtime to 10 at 7–7). Each
+// round opens with a 12-second buy phase, then 100 seconds of live play. Ember plants
+// the bomb at A or B and it blows in 35 seconds unless Vanguard defuses it; a round
+// also ends on elimination or time. Money is earned for kills and round results.
 import { WEAPONS, GRENADE_PRICE, FLASH_PRICE, SMOKE_PRICE, KIT_PRICE, ARMOR_PRICE } from './weapons.js';
 
 const BUY_SECONDS = 12;
@@ -37,10 +36,13 @@ export function createRounds(hooks) {
     hasKit: false,
     matchWinner: null,
     roundReason: '',
+    history: [],
+    winTarget: WIN_ROUNDS,
   };
 
   function startRound() {
     const { carrier, site } = hooks.bots.spawnRound(state.round);
+    hooks.onRoundPlanned && hooks.onRoundPlanned(state.round, site, carrier, state.scoreV, state.scoreE);
     state.bombSite = site;
     state.bomb = 'carried';
     state.bombX = 0;
@@ -71,6 +73,8 @@ export function createRounds(hooks) {
     state.kills = 0;
     state.deaths = 0;
     state.matchWinner = null;
+    state.history = [];
+    state.winTarget = WIN_ROUNDS;
     hooks.weapon.resetLoadout();
     startRound();
   }
@@ -80,6 +84,7 @@ export function createRounds(hooks) {
     state.phase = 'roundEnd';
     state.timer = 4;
     state.roundReason = reason;
+    state.history.push(winner === 'vanguard' ? 'V' : 'E');
     if (winner === 'vanguard') {
       state.scoreV += 1;
       state.money += WIN_REWARD;
@@ -183,8 +188,7 @@ export function createRounds(hooks) {
   }
 
   function tryBuyKit() {
-    // The defuse kit halves the player's defuse channel, from 4 seconds to 2 —
-    // the difference between a defuse and a detonation on a late retake.
+    // The defuse kit halves the player's defuse channel, 4 seconds to 2.
     if (state.phase !== 'buy') return false;
     if (state.hasKit || state.money < KIT_PRICE) {
       hooks.audio.denied();
@@ -301,7 +305,12 @@ export function createRounds(hooks) {
     if (state.phase === 'roundEnd') {
       state.timer -= dt;
       if (state.timer <= 0) {
-        if (state.scoreV >= WIN_ROUNDS || state.scoreE >= WIN_ROUNDS) {
+        // 7–7 is overtime: first to 10 takes the match, and the banner says so.
+        if (state.scoreV === 7 && state.scoreE === 7 && state.winTarget === WIN_ROUNDS) {
+          state.winTarget = 10;
+          hooks.hud.banner('OVERTIME', 'First to 10 rounds takes the match', 3000);
+        }
+        if (state.scoreV >= state.winTarget || state.scoreE >= state.winTarget) {
           endMatch();
         } else {
           state.round += 1;

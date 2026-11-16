@@ -1,9 +1,9 @@
-// The bots: four Vanguard teammates and five Ember opponents, each a visible body with
-// a health bar, a weapon and a job. Their brains run on a small state machine — patrol,
-// engage, retreat, plant, defuse, hold — over the map's waypoint graph, with line of
-// sight checked against the world, bursts of fire with real spread, and a memory of
-// where they last saw or heard an enemy. Ember attacks: one bot carries the bomb to a
-// site and plants it. Vanguard defends, then converges to defuse.
+// The bots: four Vanguard teammates and five Ember opponents, each a visible body
+// with a health bar, a weapon and a job. A state machine — patrol, engage, retreat,
+// plant, defuse, hold — runs over the map's waypoint graph, with line-of-sight checks,
+// burst fire with real spread, and a memory of where enemies were last seen or heard.
+// Ember attacks: one bot carries the bomb to a site and plants it. Vanguard defends,
+// then converges to defuse. The tactics director assigns roles and timed orders.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { WEAPONS } from './weapons.js';
@@ -43,17 +43,28 @@ function buildBody(team) {
   band.position.y = 1.58;
   const gun = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.09, 0.62), cloth);
   gun.position.set(0.2, 1.12, -0.28);
+  // Arms swing with the walk cycle; the pack marks the bomb carrier at a glance.
+  const armGeo = new THREE.BoxGeometry(0.11, 0.56, 0.13);
+  armGeo.translate(0, -0.28, 0);
+  const armL = new THREE.Mesh(armGeo, cloth);
+  armL.position.set(-0.33, 1.32, 0);
+  const armR = armL.clone();
+  armR.position.x = 0.33;
+  armR.rotation.x = -0.9;
+  const pack = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.44, 0.18), vest);
+  pack.position.set(0, 1.05, 0.24);
+  pack.visible = false;
   const barBg = healthBarSprite('#111417');
   barBg.position.y = 1.92;
   barBg.scale.set(0.66, 0.09, 1);
   const barFg = healthBarSprite(colour);
   barFg.position.y = 1.92;
   barFg.renderOrder = 2;
-  group.add(legL, legR, torso, head, band, gun, barBg, barFg);
+  group.add(legL, legR, torso, head, band, gun, barBg, barFg, armL, armR, pack);
   group.traverse((mesh) => {
     if (mesh.isMesh) { mesh.castShadow = true; mesh.receiveShadow = true; }
   });
-  return { group, torso, head, barFg, legL, legR };
+  return { group, torso, head, barFg, legL, legR, armL, armR, pack };
 }
 
 export function createBots(scene, world, rng) {
@@ -66,10 +77,11 @@ export function createBots(scene, world, rng) {
     const bot = {
       name, team, index,
       group: body.group, torso: body.torso, head: body.head, barFg: body.barFg,
-      legL: body.legL, legR: body.legR,
+      legL: body.legL, legR: body.legR, armL: body.armL, armR: body.armR, pack: body.pack,
       pos: new THREE.Vector3(0, 0, 15),
       velocity: new THREE.Vector3(),
-      yaw: 0, health: 100, alive: true,
+      yaw: 0, health: 100, alive: true, armour: 0,
+      role: null, utility: { flash: 0, smoke: 0 }, assignedGoal: null, holdUntil: 0,
       state: 'patrol', weaponId: 'smg',
       path: [], pathIndex: 0, goal: null,
       thinkAt: rng.range(0, 0.2), repathAt: 0,
@@ -94,6 +106,12 @@ export function createBots(scene, world, rng) {
     bot.yaw = yaw;
     bot.health = 100;
     bot.alive = true;
+    bot.armour = 0;
+    bot.role = null;
+    bot.utility = { flash: 0, smoke: 0 };
+    bot.assignedGoal = null;
+    bot.holdUntil = 0;
+    bot.pack.visible = false;
     bot.state = 'patrol';
     bot.weaponId = weaponId;
     bot.path = [];
@@ -165,10 +183,8 @@ export function createBots(scene, world, rng) {
   }
 
   function visibleEnemy(bot, ctx) {
-    // The nearest living enemy with line of sight, or null. Each candidate's
-    // position is read into plain numbers as it is tested, so no two candidates
-    // can share a vector, and a flash-blinded bot sees nothing at all. The sight
-    // check runs through ctx.hasLOS, which smoke clouds also block.
+    // Nearest living enemy with line of sight, or null. A flash-blinded bot sees
+    // nothing; smoke blocks sight through ctx.hasLOS.
     if (ctx.isBlinded && ctx.isBlinded(bot)) return null;
     const eyeY = bot.pos.y + 1.45;
     const facingX = Math.sin(bot.yaw);
@@ -215,10 +231,8 @@ export function createBots(scene, world, rng) {
   }
 
   function hearNoise(x, z, radius, sourceTeam, time) {
-    // Gunfire and explosions carry through the yard: bots of the other team
-    // within earshot turn toward the sound and remember the spot to investigate.
-    // The heard position is written into each bot's own persistent vector, so a
-    // burst of fire allocates nothing.
+    // Gunfire and explosions carry: bots of the other team within earshot turn
+    // toward the sound and remember the spot to investigate.
     for (const bot of list) {
       if (!bot.alive || bot.team === sourceTeam) continue;
       if (Math.hypot(bot.pos.x - x, bot.pos.z - z) > radius) continue;
@@ -230,6 +244,12 @@ export function createBots(scene, world, rng) {
 
   function damage(bot, amount, killer, killerName, ctx) {
     if (!bot.alive) return false;
+    // Bought armour absorbs half of every hit until it breaks, as the player's does.
+    if (bot.armour > 0) {
+      const absorbed = Math.min(bot.armour, amount * 0.5);
+      bot.armour -= absorbed;
+      amount -= absorbed;
+    }
     bot.health -= amount;
     bot.barFg.scale.x = Math.max(0.02, 0.62 * (bot.health / 100));
     bot.barFg.material.color.setHex(bot.health > 50 ? 0x7fd08a : bot.health > 25 ? 0xf0a830 : 0xe5484d);
@@ -284,6 +304,15 @@ export function createBots(scene, world, rng) {
         const dead = bot.target.kind === 'player' ? !ctx.player.alive : !bot.target.ref.alive;
         if (dead) bot.target = null;
       }
+      // Director's orders: a reached assigned goal is done, and a bot held for a
+      // timed execute walks to staging but picks no other job until the hold
+      // releases — unless it sees an enemy, which overrides all.
+      if (bot.assignedGoal && Math.hypot(bot.pos.x - bot.assignedGoal.x, bot.pos.z - bot.assignedGoal.z) < 1.2) {
+        bot.assignedGoal = null;
+      }
+      const holding = ctx.time < bot.holdUntil && !bot.target;
+      if (holding && bot.assignedGoal && !bot.path.length) setPath(bot, bot.assignedGoal.x, bot.assignedGoal.z);
+      if (!holding) {
       // Job selection.
       if (bot.health < 30 && bot.state !== 'retreat') {
         bot.state = 'retreat';
@@ -304,18 +333,24 @@ export function createBots(scene, world, rng) {
         bot.state = 'hold';
         if (ctx.time >= bot.repathAt) {
           bot.repathAt = ctx.time + 2;
-          const site = world.sites[bomb.site];
-          setPath(bot, site.x + rng.range(-4, 4), site.z + rng.range(-3, 3));
+          if (bot.assignedGoal) setPath(bot, bot.assignedGoal.x, bot.assignedGoal.z);
+          else {
+            const site = world.sites[bomb.site];
+            setPath(bot, site.x + rng.range(-4, 4), site.z + rng.range(-3, 3));
+          }
         }
       } else if (bot.team === 'ember') {
         bot.state = 'patrol';
         if (ctx.time >= bot.repathAt) {
           bot.repathAt = ctx.time + 1.5;
-          const carrier = list.find((b) => b.carrier && b.alive);
-          if (carrier) setPath(bot, carrier.pos.x + rng.range(-3, 3), carrier.pos.z + rng.range(-3, 3));
+          if (bot.assignedGoal) setPath(bot, bot.assignedGoal.x, bot.assignedGoal.z);
           else {
-            const site = world.sites[bomb.site];
-            setPath(bot, site.x + rng.range(-4, 4), site.z + rng.range(-4, 4));
+            const carrier = list.find((b) => b.carrier && b.alive);
+            if (carrier) setPath(bot, carrier.pos.x + rng.range(-3, 3), carrier.pos.z + rng.range(-3, 3));
+            else {
+              const site = world.sites[bomb.site];
+              setPath(bot, site.x + rng.range(-4, 4), site.z + rng.range(-4, 4));
+            }
           }
         }
       } else if (bomb.state === 'planted') {
@@ -335,7 +370,8 @@ export function createBots(scene, world, rng) {
           bot.state = 'patrol';
           if (ctx.time >= bot.repathAt) {
             bot.repathAt = ctx.time + 1.2;
-            setPath(bot, site.x + rng.range(-3, 3), site.z + rng.range(-3, 3));
+            if (bot.assignedGoal) setPath(bot, bot.assignedGoal.x, bot.assignedGoal.z);
+            else setPath(bot, site.x + rng.range(-3, 3), site.z + rng.range(-3, 3));
           }
         }
       } else {
@@ -343,25 +379,31 @@ export function createBots(scene, world, rng) {
         bot.state = 'patrol';
         if (ctx.time >= bot.repathAt) {
           bot.repathAt = ctx.time + 2;
-          const siteKey = bot.index % 2 === 0 ? 'A' : 'B';
-          const site = world.sites[siteKey];
-          if (bot.index === 3) setPath(bot, rng.range(-3, 3), rng.range(-4, 4));
-          else setPath(bot, site.x + rng.range(-3, 3), site.z + rng.range(-2, 4));
+          if (bot.assignedGoal) setPath(bot, bot.assignedGoal.x, bot.assignedGoal.z);
+          else {
+            const siteKey = bot.index % 2 === 0 ? 'A' : 'B';
+            const site = world.sites[siteKey];
+            if (bot.index === 3) setPath(bot, rng.range(-3, 3), rng.range(-4, 4));
+            else setPath(bot, site.x + rng.range(-3, 3), site.z + rng.range(-2, 4));
+          }
         }
       }
       // Lost sight but remembers where: push to the last seen position instead of
       // wandering back to a hold, so a bot that saw you comes looking for you.
+      // The bomb carrier is exempt: the objective outranks investigating.
+      const carrierOnMission = bot.carrier && bomb.state === 'carried';
       if (!bot.target && bot.lastSeen && ctx.time - bot.lastSeenAt < 6 && bot.state === 'patrol'
-        && ctx.time >= bot.repathAt) {
+        && !carrierOnMission && ctx.time >= bot.repathAt) {
         bot.repathAt = ctx.time + 1.5;
         setPath(bot, bot.lastSeen.x, bot.lastSeen.z);
       }
       // A shot heard nearby pulls a patrolling bot to investigate; fresh sound
       // wins over the older last-seen position, so this runs second.
-      if (bot.state === 'patrol' && ctx.time - bot.heardAt < 2.5 && !bot.target) {
+      if (bot.state === 'patrol' && ctx.time - bot.heardAt < 2.5 && !bot.target && !carrierOnMission) {
         setPath(bot, bot.heardPos.x, bot.heardPos.z);
         bot.heardAt = -99;
       }
+      } // end !holding
     }
 
     // Channels: planting and defusing stand still and count up.
@@ -428,18 +470,23 @@ export function createBots(scene, world, rng) {
 
     bot.group.position.copy(bot.pos);
     bot.group.rotation.set(0, bot.yaw, 0);
-    // Walk cycle: a small bob and an alternating leg swing, so a moving bot reads
-    // as moving and a holding bot stands still.
+    bot.pack.visible = bot.carrier;
+    // Walk cycle: legs and arms swing in opposition, with a small bob, so a
+    // moving bot reads as moving and a holding bot stands still.
     const speed = Math.hypot(bot.velocity.x, bot.velocity.z);
     if (speed > 0.5) {
       const phase = ctx.time * 9;
       const swing = Math.sin(phase) * 0.55;
       bot.legL.rotation.x = swing;
       bot.legR.rotation.x = -swing;
+      bot.armL.rotation.x = -swing * 0.8;
+      bot.armR.rotation.x = -0.9 + swing * 0.3;
       bot.group.position.y = Math.abs(Math.sin(phase)) * 0.04;
     } else {
       bot.legL.rotation.x = 0;
       bot.legR.rotation.x = 0;
+      bot.armL.rotation.x = 0;
+      bot.armR.rotation.x = -0.9;
       bot.group.position.y = 0;
     }
   }

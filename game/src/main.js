@@ -1,10 +1,11 @@
 // DUSTLINE — boot and the one loop: a fixed 60 Hz simulation feeding a render at the
-// display's rate. ?shot=start|play|buy|end with &seed=N sets up a deterministic frame
-// for a capture, renders it twice, then freezes it and sets window.__shotReady.
+// display's rate. ?shot=start|play|buy|end with &seed=N stages a deterministic frame,
+// renders it twice, freezes it and sets window.__shotReady.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { makeRng } from './rng.js';
 import { createAudio } from './audio.js';
+import { createTactics } from './tactics.js';
 import { buildMap } from './map.js';
 import { createPlayer } from './player.js';
 import { createInput } from './input.js';
@@ -52,6 +53,9 @@ const input = createInput(renderer.domElement, onLockChange);
 const bots = createBots(scene, world, rng);
 const body = player.state;
 
+// The tactics director is created after the grenades (it throws through them) but
+// rounds need its hook from the start, so the binding is late and guarded.
+let tactics = null;
 const rounds = createRounds({
   hud,
   audio,
@@ -61,10 +65,13 @@ const rounds = createRounds({
   weapon,
   world,
   combatBlast: (x, z) => combat.blastAt(x, z),
+  onRoundPlanned: (round, site, carrier, scoreV, scoreE) => {
+    if (tactics) tactics.planRound(round, site, carrier, scoreV, scoreE);
+  },
 });
 
-// The bomb the carrier wears: a small blinking charge, visible on the carrier's back
-// while it is carried and on the ground once planted.
+// The bomb the carrier wears: a blinking charge, visible on the carrier's back
+// while carried and on the ground once planted.
 const bombMesh = new THREE.Group();
 const bombBody = new THREE.Mesh(
   new THREE.BoxGeometry(0.34, 0.2, 0.24),
@@ -79,17 +86,16 @@ bombMesh.add(bombBody, bombLight);
 bombMesh.visible = false;
 scene.add(bombMesh);
 
-// Sight runs through one wrapper: walls (the combat raycast) and smoke clouds
-// (the grenade module) both block it, so bot perception, flash checks and the
-// minimap's enemy dots all agree on what is visible.
+// Sight runs through one wrapper: walls and smoke clouds both block it, so bot
+// perception, flash checks and the minimap's enemy dots all agree on visibility.
 let grenades = null;
 function hasSight(x1, y1, z1, x2, y2, z2) {
   if (grenades && grenades.blocksSight(x1, y1, z1, x2, y2, z2)) return false;
   return combat.hasLOS(x1, y1, z1, x2, y2, z2);
 }
 
-// The context the bots read every step: the player, the bomb, line of sight, and the
-// callbacks that let them shoot, plant and defuse. It is built once and read live.
+// The context the bots read every step: the player, the bomb, line of sight, and
+// the callbacks that let them shoot, plant and defuse. Built once, read live.
 const bombView = { state: 'none', site: 'A', x: 0, z: 0 };
 const botCtx = {
   time: 0,
@@ -153,12 +159,51 @@ let elapsed = 0;
 let frozen = false;
 let started = false;
 let buyOpen = false;
+let boardShown = false;
 let flashLevel = 0;
 let mapTimer = 0;
 let prevPhase = 'menu';
 let accumulator = 0;
 let lastTime = performance.now();
 const damageLog = [];
+
+// Match stats for the Tab scoreboard: kills and deaths per name, reset each match.
+const stats = new Map();
+function statFor(name) {
+  let s = stats.get(name);
+  if (!s) {
+    s = { kills: 0, deaths: 0 };
+    stats.set(name, s);
+  }
+  return s;
+}
+function recordKill(killerName, victimName) {
+  if (killerName) statFor(killerName).kills += 1;
+  statFor(victimName).deaths += 1;
+}
+
+function refreshBoard() {
+  const rows = (team, extra) => {
+    const list = bots.list.filter((b) => b.team === team).map((b) => ({
+      name: b.name, kills: statFor(b.name).kills, deaths: statFor(b.name).deaths, role: b.role || '',
+    }));
+    return extra ? [extra, ...list] : list;
+  };
+  const you = { name: 'You', kills: statFor('You').kills, deaths: statFor('You').deaths, role: 'player' };
+  hud.setScoreboard(rows('vanguard', you), rows('ember'), rounds.state.history);
+}
+
+tactics = createTactics({
+  bots,
+  world,
+  rng,
+  hooks: {
+    now: () => elapsed,
+    onCallout: (text, team) => hud.callout(text, team),
+    throwFlash: (from, dir, team) => grenades.throwFlash(new THREE.Vector3(from.x, from.y, from.z), new THREE.Vector3(dir.x, dir.y, dir.z).normalize(), team),
+    throwSmoke: (from, dir, team) => grenades.throwSmoke(new THREE.Vector3(from.x, from.y, from.z), new THREE.Vector3(dir.x, dir.y, dir.z).normalize(), team),
+  },
+});
 
 function damageBot(bot, amount, killer, killerName) {
   const killed = bots.damage(bot, amount, killer, killerName, botCtx);
@@ -168,6 +213,7 @@ function damageBot(bot, amount, killer, killerName) {
     if (killed) {
       rounds.onKill('ember', true);
       hud.killfeed(`You ▸ ${bot.name}`, false);
+      recordKill('You', bot.name);
     }
   }
   return killed;
@@ -182,10 +228,12 @@ function damagePlayer(amount, from) {
     bots: bots.list.map((b) => `${b.name}:${b.state}:${b.target ? b.target.kind : '-'}`),
   });
   if (damageLog.length > 50) damageLog.shift();
+  const wasAlive = body.alive;
   player.damage(amount);
   hud.damageFlash();
   audio.hurt();
   hud.setHealth(body.health, body.armor);
+  if (wasAlive && !body.alive) statFor('You').deaths += 1;
   if (!body.alive) {
     rounds.onPlayerDeath();
     hud.banner('YOU ARE DOWN', 'Your squad fights on — you return next round', 3200);
@@ -197,6 +245,7 @@ function damagePlayer(amount, from) {
 function onBotKilled(bot, killer, killerName) {
   if (killer === 'player') return; // damageBot already reported it
   hud.killfeed(`${killerName || 'Ember'} ▸ ${bot.name}`, false);
+  recordKill(killerName || 'Ember', bot.name);
   if (bot.team === 'vanguard' && killer === 'bot') {
     // A teammate falling to Ember fire.
   }
@@ -226,8 +275,7 @@ const BASE_FOV = 74;
 let currentFov = BASE_FOV;
 function updateOptics() {
   // Aiming narrows the field of view by the weapon's zoom factor — the sniper's
-  // 3.2x scope is a real scope, with its overlay ring and the view model hidden
-  // while scoped. Every other weapon gets its own smaller zoom.
+  // 3.2x scope is a real scope, with its overlay ring and the view model hidden.
   const aiming = input.state.aiming && body.alive && rounds.state.phase !== 'menu';
   const def = weapon.def();
   const scoped = aiming && def.id === 'sniper';
@@ -338,8 +386,7 @@ hud.onBuy((id) => {
 document.getElementById('buy-close').addEventListener('click', () => toggleBuy(false));
 
 function throwFromHand(kind) {
-  // One throw path for all three grenade types: frags fly from combat, flashes
-  // and smoke from the grenade module, and the HUD counts all three.
+  // One throw path for all three grenade types; the HUD counts all three.
   if (rounds.state.phase !== 'live' || !body.alive) return;
   const ws = weapon.state;
   if (kind === 'frag' && ws.grenades <= 0) return;
@@ -390,21 +437,28 @@ function step(dt) {
 
   if (phase === 'buy' || phase === 'live') {
     if (body.alive) player.step(dt, input.state.keys, input.state.aiming);
-    weapon.step(dt, input.state.aiming);
+    weapon.step(dt, input.state.aiming, player.groundSpeed());
     // The crosshair tracks the live spread every step, so moving, jumping and
     // sustained fire visibly widen it before the next shot, not after.
     hud.setCrosshairSpread(4 + weapon.spread(player.groundSpeed(), body.crouching, !body.onGround) * (input.state.aiming ? 0.45 : 1) * 900);
   }
   if (phase === 'live') {
     bots.step(dt, botCtx);
+    if (tactics) tactics.update(dt, rounds.state.bomb);
   }
   combat.step(dt);
   grenades.step(dt);
   rounds.step(dt);
+  world.tick(dt, elapsed);
 
   // Entering a buy phase starts a fresh round: lingering smoke and live
-  // canisters are cleared, and the flash white-out never carries over either.
-  if (rounds.state.phase === 'buy' && prevPhase !== 'buy') grenades.clear();
+  // canisters are cleared, the flash white-out never carries over, the drums
+  // restock, and a new match resets the scoreboard stats.
+  if (rounds.state.phase === 'buy' && prevPhase !== 'buy') {
+    grenades.clear();
+    combat.resetBarrels();
+    if (prevPhase === 'menu' || prevPhase === 'matchEnd') stats.clear();
+  }
   prevPhase = rounds.state.phase;
 
   // The flashbang white-out fades over a couple of seconds of simulation time.
@@ -418,6 +472,7 @@ function step(dt) {
   if (mapTimer >= 0.25) {
     mapTimer = 0;
     minimap.draw();
+    if (input.state.keys.has('Tab')) refreshBoard();
   }
 
   // The bomb mesh follows its carrier, then sits on the ground once planted.
@@ -468,6 +523,11 @@ function frame(now) {
       steps += 1;
     }
     if (accumulator > FIXED_STEP * 5) accumulator = 0;
+    // The board fills the instant Tab is pressed, then refreshes with the minimap.
+    const tabDown = input.state.keys.has('Tab') && started && rounds.state.phase !== 'menu';
+    hud.showScoreboard(tabDown);
+    if (tabDown && !boardShown) refreshBoard();
+    boardShown = tabDown;
     syncCamera();
     updateOptics();
   }
@@ -525,22 +585,22 @@ function runShot(name) {
     settle(10);
     hud.showBuy(true, 4200, ownedSet());
   } else if (name === 'play' || name === 'end') {
-    // Skip the buy phase: the round is live, the player is west of the mid wall with
-    // a clear lane north, bots are in view.
+    // Skip the buy phase: the round is live, the player stands on the mid overlook
+    // deck with the north approaches, the bots and the yard in view.
     rounds.state.phase = 'live';
     rounds.state.timer = 87;
     hud.setTimer(87, 'live');
     hud.showBuyHint(false);
-    body.position.set(-6, 0, 0);
+    body.position.set(0, 1.7, -6.8);
     body.yaw = 0;
     body.pitch = 0;
     const ember = bots.list.filter((b) => b.team === 'ember');
     const vang = bots.list.filter((b) => b.team === 'vanguard');
-    stageBot(ember[0], -2.5, -3, Math.PI);
-    stageBot(ember[1], 3.5, -7, Math.PI);
-    stageBot(ember[2], 6, 2, Math.PI * 0.75);
-    stageBot(vang[0], -5, 3, 0);
-    stageBot(vang[1], 5, 6, 0);
+    stageBot(ember[0], -2, -11, Math.PI);
+    stageBot(ember[1], 2.5, -12, Math.PI);
+    stageBot(ember[2], 5.5, -9.5, Math.PI * 0.75);
+    stageBot(vang[0], -4, -8.5, 0);
+    stageBot(vang[1], -6, -10, 0);
     settle(24);
     if (name === 'play') {
       // A smoke grenade blooms ahead first, so the frame shows the cloud, the
@@ -548,27 +608,24 @@ function runShot(name) {
       weapon.state.grenades = 1;
       weapon.state.flashes = 1;
       weapon.state.smokes = 1;
-      grenades.throwSmoke(new THREE.Vector3(-6, 1.6, 0), new THREE.Vector3(0.45, 0.15, -0.88).normalize());
+      grenades.throwSmoke(new THREE.Vector3(0, 3.3, -6.8), new THREE.Vector3(0, -0.95, -0.3).normalize());
       settle(78);
       // Re-stage the bots after the smoke blooms: the live simulation moved them
       // while the cloud formed, and the shot wants them back in the lane.
-      stageBot(ember[0], -2.5, -3, Math.PI);
-      stageBot(ember[1], 3.5, -7, Math.PI);
-      stageBot(ember[2], 6, 2, Math.PI * 0.75);
-      stageBot(vang[0], -5, 3, 0);
-      stageBot(vang[1], 5, 6, 0);
+      stageBot(ember[0], -2, -11, Math.PI);
+      stageBot(ember[1], 2.5, -12, Math.PI);
+      stageBot(ember[2], 5.5, -9.5, Math.PI * 0.75);
+      stageBot(vang[0], -4, -8.5, 0);
+      stageBot(vang[1], -6, -10, 0);
       settle(2);
-      // The aim point sits slightly left and high of the bot's chest: the ray
-      // leaves the muzzle offset right and low of the camera, so aiming dead
-      // centre would send it past the torso's edge. The matrix update mirrors
-      // what the render loop does every frame: no frame has rendered yet in the
-      // staged capture, so the bots' world matrices are still stale and the
-      // raycast would test their meshes at the origin.
+      // Aim slightly left/high of the chest: the ray leaves the muzzle offset right
+      // and low of the camera. updateMatrixWorld mirrors the render loop: no frame
+      // has rendered yet in the staged capture, so world matrices are stale.
       scene.updateMatrixWorld(true);
-      aimAt(new THREE.Vector3(-2.7, 1.1, -3.2));
+      aimAt(new THREE.Vector3(5.3, 1.1, -9.7));
       shootPlayer();
       settle(2);
-      aimAt(new THREE.Vector3(-2.7, 1.1, -3.2));
+      aimAt(new THREE.Vector3(5.3, 1.1, -9.7));
     } else {
       // Round over: Ember wiped out, Vanguard ahead 3–2, banner up. The score is set
       // to 2 first because the elimination check adds the winning point during settle.
@@ -589,6 +646,9 @@ function runShot(name) {
     }
   }
   hud.setScore(rounds.state.scoreV, rounds.state.scoreE);
+  // The callout names the director's real plan for this round, added last so its
+  // fade timer starts at the capture, not before the staging settles.
+  if (name === 'play') hud.callout(`EXECUTE — Ember hits Site ${tactics.describe().site}`, 'ember');
   hud.setAmmo(weapon.ammo[weapon.state.current].mag, weapon.ammo[weapon.state.current].reserve);
   hud.setHealth(body.health, body.armor);
   hud.setMoney(rounds.state.money);
@@ -616,6 +676,9 @@ window.__dustline = {
       money: rounds.state.money,
       timer: Math.round(rounds.state.timer * 10) / 10,
       bomb: rounds.state.bomb,
+      winTarget: rounds.state.winTarget,
+      history: rounds.state.history.join(''),
+      tactics: tactics ? tactics.describe() : null,
       fov: Math.round(camera.fov * 10) / 10,
       player: {
         x: Math.round(body.position.x * 100) / 100,
@@ -634,6 +697,7 @@ window.__dustline = {
         name: b.name, team: b.team, alive: b.alive,
         x: Math.round(b.pos.x * 10) / 10, z: Math.round(b.pos.z * 10) / 10,
         state: b.state, health: Math.round(b.health),
+        role: b.role, weapon: b.weaponId, armour: Math.round(b.armour),
       })),
       damageLog,
     };

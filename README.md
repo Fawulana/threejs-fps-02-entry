@@ -10,6 +10,12 @@ teams of five, a buy phase, bomb plant/defuse objectives, grenades,
 bot teammates and opponents with routes and reactions, headshots,
 recoil and spread, a minimap, and round/match flow with a full HUD.
 
+v3 adds a tactics director (timed site executes, fakes and grouped
+retakes, bot-thrown utility, an economy with eco rounds and armour),
+wall penetration, explosive drums, a jumpable overlook deck, a Tab
+scoreboard with round history, overtime at 7–7, and a living dusk sky
+with dust and chimney smoke.
+
 ## Run it
 
 ```sh

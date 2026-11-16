@@ -1,8 +1,8 @@
-// Combat: hitscan shooting with headshots, tracers, impact marks and muzzle flashes,
-// plus arcing frag grenades. One raycaster is reused for every shot and every line of
-// sight check, and the tracer and impact pools are allocated once — no new objects are
-// made in a hot loop. Damage is applied through the hooks main.js wires in, so this
-// module never decides who wins a round.
+// Combat: hitscan shooting with headshots, wall penetration, explosive drums,
+// tracers, impact marks and muzzle flashes, plus arcing frag grenades. One raycaster
+// is reused for every shot and line-of-sight check; tracer and impact pools are
+// allocated once. Damage goes through the hooks main.js wires in, so this module
+// never decides who wins a round.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 
@@ -19,7 +19,16 @@ export function createCombat(scene, world, rng, hooks) {
   const hitNormal = new THREE.Vector3();
   const markTarget = new THREE.Vector3();
   const nextPos = new THREE.Vector3();
+  const segOrigin = new THREE.Vector3();
+  const segEnd = new THREE.Vector3();
   const up = new THREE.Vector3(0, 1, 0);
+
+  // Explosive drums: shot, they take damage like a body; emptied, they detonate.
+  const barrels = (world.barrels || []).map((b) => {
+    const state = { mesh: b.mesh, collider: b.collider, min: b.min.clone(), max: b.max.clone(), hp: 40, dead: false };
+    b.mesh.userData.barrel = state;
+    return state;
+  });
 
   // The player's hitbox: an invisible box the raycaster can hit, kept on the player.
   const playerHitbox = new THREE.Mesh(
@@ -120,41 +129,121 @@ export function createCombat(scene, world, rng, hooks) {
     impact.mark.material.opacity = 0.55;
   }
 
+  function showBlast(p) {
+    blastSphere.position.copy(p);
+    blastSphere.visible = true;
+    blastSphere.scale.setScalar(0.5);
+    blastLight.position.copy(p);
+    blastLight.intensity = 60;
+    blastLife = 0.35;
+  }
+
+  function detonateAt(p, radius, base, shooterTeam, shooterName) {
+    // Radial damage with falloff, to bots, the player — and other drums, so a blast
+    // beside a second drum chains. The thrower is not spared.
+    showBlast(p);
+    hooks.onExplosion(p);
+    for (const bot of hooks.bots.list) {
+      if (!bot.alive) continue;
+      const d = Math.hypot(bot.pos.x - p.x, bot.pos.z - p.z);
+      if (d < radius) hooks.damageBot(bot, Math.round(base * (1 - d / radius) + 10), shooterTeam === 'player' ? 'player' : 'bot', shooterName);
+    }
+    if (hooks.player.alive) {
+      const d = Math.hypot(hooks.player.position.x - p.x, hooks.player.position.z - p.z);
+      if (d < radius) hooks.damagePlayer(Math.round(base * (1 - d / radius) + 10), p);
+    }
+    for (const barrel of barrels) {
+      if (barrel.dead) continue;
+      const d = Math.hypot(barrel.mesh.position.x - p.x, barrel.mesh.position.z - p.z);
+      if (d < radius && d > 0.01) damageBarrel(barrel, 120, shooterTeam, shooterName);
+    }
+  }
+
+  function damageBarrel(barrel, amount, shooterTeam, shooterName) {
+    if (barrel.dead) return;
+    barrel.hp -= amount;
+    if (barrel.hp > 0) return;
+    barrel.dead = true;
+    barrel.mesh.visible = false;
+    // A spent drum leaves no invisible wall: its collider drops below the floor.
+    barrel.collider.min.set(0, -100, 0);
+    barrel.collider.max.set(0, -99, 0);
+    detonateAt(barrel.mesh.position, 5.5, 90, shooterTeam, shooterName);
+  }
+
   function resolveShot(from, dir, def, shooterTeam, maxDist, shooterName) {
-    raycaster.set(from, dir);
-    raycaster.far = maxDist;
-    const hit = raycaster.intersectObjects(targets, false)[0];
-    const end = hit ? hit.point : tmp.copy(from).addScaledVector(dir, maxDist);
+    // A shot walks up to three segments: a spent drum is stepped past, a wall costs
+    // penetration budget (0.35 m a wall) and 45% of the damage, and the first body
+    // hit ends the walk. Thin cover is concealment, not safety, against a rifle.
+    segOrigin.copy(from);
+    let remaining = maxDist;
+    let penLeft = def.pen || 0;
+    let penCount = 0;
+    let end = segEnd.copy(from).addScaledVector(dir, maxDist);
+    for (let seg = 0; seg < 3; seg += 1) {
+      raycaster.set(segOrigin, dir);
+      raycaster.far = remaining;
+      const hit = raycaster.intersectObjects(targets, false)[0];
+      if (!hit) {
+        end = segEnd.copy(segOrigin).addScaledVector(dir, remaining);
+        break;
+      }
+      end = hit.point;
+      hitNormal.copy(hit.face ? hit.face.normal : up);
+      const barrel = hit.object.userData.barrel;
+      if (barrel) {
+        if (barrel.dead) {
+          segOrigin.copy(hit.point).addScaledVector(dir, 0.3);
+          remaining -= hit.distance + 0.3;
+          continue;
+        }
+        damageBarrel(barrel, def.damage, shooterTeam, shooterName);
+        showImpact(hit.point, hitNormal);
+        showTracer(from, end);
+        return { hit: true, wall: true, barrel: true };
+      }
+      if (hit.object.userData.bot) {
+        const bot = hit.object.userData.bot;
+        if (!bot.alive || bot.team === shooterTeam) {
+          showTracer(from, end);
+          return { hit: true, blocked: true };
+        }
+        const dist = from.distanceTo(hit.point);
+        const falloff = Math.max(0.55, 1 - dist / (def.range * 2));
+        const head = hit.object.userData.part === 'head';
+        const amount = Math.round(def.damage * (head ? def.headMult : 1) * falloff * Math.pow(0.55, penCount));
+        const killed = hooks.damageBot(bot, amount, shooterTeam === 'player' ? 'player' : 'bot', shooterName);
+        showImpact(hit.point, hitNormal);
+        showTracer(from, end);
+        return { hit: true, bot, head, amount, killed, penetrated: penCount > 0 };
+      }
+      if (hit.object.userData.player) {
+        // Only Ember fire can hurt the player: a Vanguard bot's stray round and the
+        // player's own muzzle can never register on their own hitbox.
+        if (shooterTeam !== 'ember' || !hooks.player.alive) {
+          showTracer(from, end);
+          return { hit: true, blocked: true };
+        }
+        const dist = from.distanceTo(hit.point);
+        const falloff = Math.max(0.55, 1 - dist / (def.range * 2));
+        const head = hit.point.y > hooks.player.position.y + 1.35;
+        const amount = Math.round(def.damage * (head ? def.headMult : 1) * falloff * Math.pow(0.55, penCount));
+        hooks.damagePlayer(amount, from);
+        showImpact(hit.point, hitNormal);
+        showTracer(from, end);
+        return { hit: true, player: true, head, amount, penetrated: penCount > 0 };
+      }
+      showImpact(hit.point, hitNormal);
+      if (penLeft >= 0.35 && seg < 2) {
+        penLeft -= 0.35;
+        penCount += 1;
+        segOrigin.copy(hit.point).addScaledVector(dir, 0.25);
+        remaining -= hit.distance + 0.25;
+        continue;
+      }
+      break;
+    }
     showTracer(from, end);
-    if (!hit) return { hit: false };
-    // The hit point and normal are read straight off the intersection and copied
-    // into scratch storage where they are needed; nothing here clones a vector.
-    hitNormal.copy(hit.face ? hit.face.normal : up);
-    if (hit.object.userData.bot) {
-      const bot = hit.object.userData.bot;
-      if (!bot.alive || bot.team === shooterTeam) return { hit: true, blocked: true };
-      const dist = hit.distance;
-      const falloff = Math.max(0.55, 1 - dist / (def.range * 2));
-      const head = hit.object.userData.part === 'head';
-      const amount = Math.round(def.damage * (head ? def.headMult : 1) * falloff);
-      const killed = hooks.damageBot(bot, amount, shooterTeam === 'player' ? 'player' : 'bot', shooterName);
-      showImpact(hit.point, hitNormal);
-      return { hit: true, bot, head, amount, killed };
-    }
-    if (hit.object.userData.player) {
-      // Only Ember fire can hurt the player: a Vanguard bot's stray round and the
-      // player's own muzzle can never register on their own hitbox.
-      if (shooterTeam !== 'ember') return { hit: true, blocked: true };
-      if (!hooks.player.alive) return { hit: true, blocked: true };
-      const dist = hit.distance;
-      const falloff = Math.max(0.55, 1 - dist / (def.range * 2));
-      const head = hit.point.y > hooks.player.position.y + 1.35;
-      const amount = Math.round(def.damage * (head ? def.headMult : 1) * falloff);
-      hooks.damagePlayer(amount, from);
-      showImpact(hit.point, hitNormal);
-      return { hit: true, player: true, head, amount };
-    }
-    showImpact(hit.point, hitNormal);
     return { hit: true, wall: true };
   }
 
@@ -208,23 +297,7 @@ export function createCombat(scene, world, rng, hooks) {
   function explode(grenade) {
     const p = grenade.mesh.position;
     scene.remove(grenade.mesh);
-    blastSphere.position.copy(p);
-    blastSphere.visible = true;
-    blastSphere.scale.setScalar(0.5);
-    blastLight.position.copy(p);
-    blastLight.intensity = 60;
-    blastLife = 0.35;
-    hooks.onExplosion(p);
-    // Damage falls off with distance; the thrower is not spared.
-    for (const bot of hooks.bots.list) {
-      if (!bot.alive) continue;
-      const d = Math.hypot(bot.pos.x - p.x, bot.pos.z - p.z);
-      if (d < GRENADE_RADIUS) hooks.damageBot(bot, Math.round(95 * (1 - d / GRENADE_RADIUS) + 10), 'player', 'You');
-    }
-    if (hooks.player.alive) {
-      const d = Math.hypot(hooks.player.position.x - p.x, hooks.player.position.z - p.z);
-      if (d < GRENADE_RADIUS) hooks.damagePlayer(Math.round(95 * (1 - d / GRENADE_RADIUS) + 10), p);
-    }
+    detonateAt(p, GRENADE_RADIUS, 95, 'player', 'You');
   }
 
   function stepGrenades(dt) {
@@ -277,12 +350,18 @@ export function createCombat(scene, world, rng, hooks) {
   }
 
   function blastAt(x, z, y = 1) {
-    blastSphere.position.set(x, y, z);
-    blastSphere.visible = true;
-    blastSphere.scale.setScalar(0.5);
-    blastLight.position.set(x, y, z);
-    blastLight.intensity = 60;
-    blastLife = 0.35;
+    showBlast(tmp.set(x, y, z));
+  }
+
+  function resetBarrels() {
+    // A new round restocks the yard: every drum is whole, visible and solid again.
+    for (const barrel of barrels) {
+      barrel.hp = 40;
+      barrel.dead = false;
+      barrel.mesh.visible = true;
+      barrel.collider.min.copy(barrel.min);
+      barrel.collider.max.copy(barrel.max);
+    }
   }
 
   return {
@@ -290,6 +369,7 @@ export function createCombat(scene, world, rng, hooks) {
     botShot,
     throwGrenade,
     blastAt,
+    resetBarrels,
     hasLOS,
     playerHitbox,
     step(dt) {

@@ -1,6 +1,6 @@
 // The DOM HUD: health, armour, ammo, money, timer, score, team counts, kill feed,
-// banners, the damage flash, the buy menu and the overlay panels. It never touches the
-// simulation; main.js pushes numbers in and reads callbacks out.
+// callouts, scoreboard, banners, the damage flash, the buy menu and the overlay
+// panels. It never touches the simulation; main.js pushes numbers in.
 import { WEAPONS, GRENADE_PRICE, FLASH_PRICE, SMOKE_PRICE, KIT_PRICE, ARMOR_PRICE } from './weapons.js';
 
 const BUY_ITEMS = [
@@ -62,6 +62,12 @@ export function createHud() {
   const interactHint = $('interact-hint');
   const flashWhite = $('flash-white');
   const scopeEl = $('scope');
+  const callouts = $('callouts');
+  const scoreboard = $('scoreboard');
+  const scoreRowsV = $('score-rows-v');
+  const scoreRowsE = $('score-rows-e');
+  const scoreHistory = $('score-history');
+  let scoreboardShown = false;
 
   let hitTimer = 0;
   let bannerTimer = 0;
@@ -122,8 +128,6 @@ export function createHud() {
       grenadeValue.textContent = `◉ ${frag}  ✦ ${flash}  ☁ ${smoke}`;
     },
     setFlashLevel(level) {
-      // The flashbang white-out: opacity is driven by the simulation's decay, so
-      // a full-strength flash fades over seconds and a glancing one over a blink.
       flashWhite.style.opacity = level <= 0.01 ? '0' : String(Math.min(1, level));
     },
     setScope(show) {
@@ -200,6 +204,28 @@ export function createHud() {
       while (killfeed.children.length > 5) killfeed.removeChild(killfeed.lastChild);
       setTimeout(() => line.classList.add('fade'), 4200);
       setTimeout(() => line.remove(), 5200);
+    },
+    callout(text, team) {
+      const line = document.createElement('div');
+      line.className = `feed-line callout ${team === 'ember' ? 'e' : 'v'}`;
+      line.textContent = text;
+      callouts.prepend(line);
+      while (callouts.children.length > 4) callouts.removeChild(callouts.lastChild);
+      setTimeout(() => line.classList.add('fade'), 4200);
+      setTimeout(() => line.remove(), 5200);
+    },
+    showScoreboard(show) {
+      if (show === scoreboardShown) return;
+      scoreboardShown = show;
+      scoreboard.hidden = !show;
+    },
+    setScoreboard(rowsV, rowsE, history) {
+      // Hold Tab: kills/deaths/role for both teams, plus the round history strip.
+      const row = (r) => `<tr><td>${r.name}</td><td>${r.kills}</td><td>${r.deaths}</td><td>${r.role || ''}</td></tr>`;
+      scoreRowsV.innerHTML = rowsV.map(row).join('');
+      scoreRowsE.innerHTML = rowsE.map(row).join('');
+      scoreHistory.textContent = history.map((h) => (h === 'V' ? '●' : '○')).join(' ') || 'No rounds yet';
+      scoreHistory.className = history.length ? '' : 'empty';
     },
     banner(title, sub, ms = 2400) {
       bannerTitle.textContent = title;

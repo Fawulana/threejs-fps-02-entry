@@ -1,12 +1,9 @@
-// Flashbangs and smoke grenades: the tactical half of the grenade slot. A flashbang
-// pops after a short fuse and blinds anyone who can see the burst — the player gets a
-// white overlay that fades with the strength of the flash, bots stop perceiving and
-// firing until their sight returns, and facing away or standing far off softens it.
-// Smoke blooms into a drifting cloud that blocks sight: bots cannot acquire targets
-// through it and the player's shots still fly, so it buys a crossing. Both fly as
-// bouncing canisters with the same gravity and wall bounces as the frag, and both are
-// bought in the buy menu and thrown with their own keys. No objects are allocated in
-// step: every projectile, puff and scratch vector is pooled or module-level.
+// Flashbangs and smoke grenades. A flash pops after a short fuse and blinds anyone
+// who can see the burst — the player gets a fading white overlay, bots stop perceiving
+// and firing until sight returns, and facing away or standing far off softens it.
+// Smoke blooms into a drifting cloud that blocks sight for bots and flash checks.
+// Both fly as bouncing canisters, are bought in the buy menu, and can be thrown by
+// bots on the tactics director's orders (a bot's own team is spared its flash).
 import * as THREE from 'three';
 
 const FLASH_FUSE = 1.4;
@@ -44,13 +41,14 @@ export function createGrenades(scene, world, hooks) {
   scene.add(popSprite);
   let popLife = 0;
 
-  function launch(kind, from, dir) {
+  function launch(kind, from, dir, team = 'player') {
     const mesh = new THREE.Mesh(canGeo, kind === 'flash' ? flashMat : smokeMat);
     mesh.position.copy(from);
     mesh.castShadow = true;
     scene.add(mesh);
     projectiles.push({
       kind,
+      team,
       mesh,
       velocity: new THREE.Vector3(dir.x * THROW_SPEED, dir.y * THROW_SPEED + 3.2, dir.z * THROW_SPEED),
       fuse: kind === 'flash' ? FLASH_FUSE : SMOKE_FUSE,
@@ -79,11 +77,12 @@ export function createGrenades(scene, world, hooks) {
     hooks.onNoise(burstAt.x, burstAt.z, 26);
 
     // The player: line of sight and facing decide the strength of the white-out.
+    // A Vanguard bot's flash never blinds its own teammate, the player.
     const eye = hooks.player;
     const pdx = eye.position.x - burstAt.x;
     const pdz = eye.position.z - burstAt.z;
     const pdist = Math.hypot(pdx, pdz);
-    if (eye.alive && pdist < FLASH_RADIUS && hooks.hasLOS(
+    if (p.team !== 'vanguard' && eye.alive && pdist < FLASH_RADIUS && hooks.hasLOS(
       burstAt.x, burstAt.y, burstAt.z,
       eye.position.x, eye.position.y + eye.eye, eye.position.z,
     )) {
@@ -95,8 +94,9 @@ export function createGrenades(scene, world, hooks) {
     }
 
     // Bots: a blinded bot keeps its body but loses its eyes until blindUntil passes.
+    // A bot's own team is spared — the flash is a team play, not friendly fire.
     for (const bot of hooks.bots.list) {
-      if (!bot.alive) continue;
+      if (!bot.alive || bot.team === p.team) continue;
       const dx = bot.pos.x - burstAt.x;
       const dz = bot.pos.z - burstAt.z;
       const dist = Math.hypot(dx, dz);
@@ -202,8 +202,8 @@ export function createGrenades(scene, world, hooks) {
       popSprite.visible = false;
       popLight.intensity = 0;
     },
-    throwFlash(from, dir) { launch('flash', from, dir); },
-    throwSmoke(from, dir) { launch('smoke', from, dir); },
+    throwFlash(from, dir, team) { launch('flash', from, dir, team); },
+    throwSmoke(from, dir, team) { launch('smoke', from, dir, team); },
     isBlinded(bot) {
       return (bot.blindUntil || 0) > clock;
     },

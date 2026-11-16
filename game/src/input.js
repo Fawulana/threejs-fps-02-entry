@@ -1,6 +1,6 @@
-// Keyboard and mouse, and the pointer lock that turns the mouse into look. Plain browser
-// APIs only. Edge-triggered keys (buy, grenade, defuse, weapon slots) are collected in a
-// pressed set the game drains once per frame, so a tap is never lost between steps.
+// Keyboard and mouse, and the pointer lock that turns the mouse into look.
+// Edge-triggered keys are collected in a pressed set the game drains once per frame,
+// so a tap is never lost between steps.
 export function createInput(canvas, onLockChange) {
   const keys = new Set();
   const pressed = new Set();
@@ -14,6 +14,7 @@ export function createInput(canvas, onLockChange) {
       keys.delete(event.code);
     }
     if (event.code === 'Space') event.preventDefault();
+    if (event.code === 'Tab') event.preventDefault();
   }
 
   window.addEventListener('keydown', (event) => setKey(event, true));

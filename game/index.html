@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DUSTLINE — a three.js tactical FPS</title>
 <style>
-  /* Look plan: dusk concrete, sodium amber, Vanguard teal against Ember orange. */
+  /* Look: dusk concrete, sodium amber, Vanguard teal against Ember orange. */
   :root {
     --canvas: #0e1116;
     --surface: #1b2027;
@@ -35,7 +35,7 @@
   #hud { position: fixed; inset: 0; pointer-events: none; }
   [hidden] { display: none !important; }
 
-  /* Crosshair: four ticks that widen with spread, driven by --spread. */
+  /* Crosshair: four ticks widening with spread, driven by --spread. */
   #crosshair { position: fixed; left: 50%; top: 50%; width: 0; height: 0; --spread: 4px; }
   #crosshair i { position: absolute; background: var(--ink); opacity: .9; }
   #crosshair i:nth-child(1) { left: -1px; top: calc(-11px - var(--spread)); width: 2px; height: 7px; }
@@ -63,10 +63,10 @@
   }
   #damage-flash.on { opacity: 1; }
 
-  /* Flashbang white-out: opacity is driven by the simulation's decay. */
+  /* Flashbang white-out, opacity driven by the simulation. */
   #flash-white { position: fixed; inset: 0; background: #fff8e6; opacity: 0; pointer-events: none; }
 
-  /* Sniper scope: a clear circle with cross lines, the rest of the view darkened. */
+  /* Sniper scope overlay. */
   #scope { position: fixed; inset: 0; pointer-events: none; }
   #scope .ring {
     position: absolute; left: 50%; top: 50%; width: 56vmin; height: 56vmin;
@@ -76,7 +76,7 @@
   #scope .ring::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgba(236, 231, 219, .8); }
   #scope .ring::after { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 1px; background: rgba(236, 231, 219, .8); }
 
-  /* Tactical minimap: walls, sites, teammates, the planted bomb and smoke. */
+  /* Minimap. */
   #minimap {
     position: fixed; top: 64px; left: 20px; width: 176px; height: 140px;
     border: 1px solid var(--hairline); border-radius: var(--radius-panel); background: #10141a;
@@ -110,6 +110,29 @@
     position: fixed; top: 16px; right: 20px; display: flex; flex-direction: column; gap: 6px;
     align-items: flex-end; font-family: var(--font-readout); font-size: 13px;
   }
+  #callouts {
+    position: fixed; top: 212px; left: 20px; display: flex; flex-direction: column; gap: 6px;
+    align-items: flex-start; font-family: var(--font-readout); font-size: 13px;
+  }
+  .feed-line.callout.v { border-color: var(--vanguard); color: var(--vanguard); }
+  .feed-line.callout.e { border-color: var(--ember); color: var(--ember); }
+
+  /* Scoreboard: hold Tab. Both teams, kills/deaths/role, round history. */
+  #scoreboard {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(520px, 92vw); padding: 20px 24px; background: rgba(27, 32, 39, .96);
+    border: 1px solid var(--hairline); border-radius: var(--radius-panel);
+    font-family: var(--font-readout); font-size: 13px; pointer-events: none;
+  }
+  #scoreboard h2 { margin: 0 0 12px; font-size: 16px; letter-spacing: .14em; }
+  #scoreboard table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+  #scoreboard th { text-align: left; font-size: 11px; letter-spacing: .12em; color: var(--muted); padding: 3px 6px; }
+  #scoreboard td { padding: 3px 6px; }
+  #scoreboard td:nth-child(2), #scoreboard td:nth-child(3), #scoreboard th:nth-child(2), #scoreboard th:nth-child(3) { text-align: right; width: 44px; }
+  #scoreboard .v { color: var(--vanguard); }
+  #scoreboard .e { color: var(--ember); }
+  #score-history { color: var(--muted); letter-spacing: .3em; }
+  #score-history.empty { letter-spacing: normal; }
   .feed-line {
     padding: 5px 10px; background: rgba(14, 17, 22, .8); border: 1px solid var(--hairline);
     border-radius: var(--radius-panel); transition: opacity 1s linear;
@@ -229,7 +252,15 @@
 
   <div id="bomb-status" hidden>EMBER CARRIES THE BOMB</div>
   <canvas id="minimap" width="176" height="140"></canvas>
+  <div id="callouts"></div>
   <div id="killfeed"></div>
+
+  <div id="scoreboard" hidden>
+    <h2>SCOREBOARD</h2>
+    <table><thead><tr><th class="v">VANGUARD</th><th>K</th><th>D</th><th>ROLE</th></tr></thead><tbody id="score-rows-v"></tbody></table>
+    <table><thead><tr><th class="e">EMBER</th><th>K</th><th>D</th><th>ROLE</th></tr></thead><tbody id="score-rows-e"></tbody></table>
+    <div id="score-history"></div>
+  </div>
 
   <div id="vitals">
     <div id="health-row"><span id="health-num">100</span><span id="armor-num">0</span></div>
@@ -260,7 +291,8 @@
       <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move &nbsp; <kbd>Mouse</kbd> Look</li>
       <li><kbd>Click</kbd> Fire &nbsp; <kbd>R</kbd> Reload &nbsp; <kbd>Right-click</kbd> Aim</li>
       <li><kbd>1</kbd>–<kbd>5</kbd> Weapons &nbsp; <kbd>G</kbd> Frag &nbsp; <kbd>F</kbd> Flash &nbsp; <kbd>H</kbd> Smoke &nbsp; <kbd>E</kbd> Defuse</li>
-      <li><kbd>B</kbd> Buy menu &nbsp; <kbd>Ctrl</kbd> Crouch &nbsp; <kbd>Space</kbd> Jump</li>
+      <li><kbd>B</kbd> Buy menu &nbsp; <kbd>Ctrl</kbd> Crouch &nbsp; <kbd>Space</kbd> Jump &nbsp; <kbd>Tab</kbd> Scoreboard</li>
+      <li>Red drums explode when shot · the mid overlook deck is reached by jumping the crates</li>
     </ul>
   </section>
 </div>

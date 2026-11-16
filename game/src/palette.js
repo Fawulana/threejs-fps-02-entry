@@ -1,5 +1,4 @@
-// The look plan, in one place. DUSTLINE is a dusk-lit industrial yard: cold concrete and
-// steel, warm sodium lamps, and two team colours that read at a glance — Vanguard teal
+// The look plan, in one place: dusk concrete and steel, sodium lamps, Vanguard teal
 // against Ember orange. The same names are the CSS custom properties in index.html.
 export const PALETTE = {
   canvas: '#0e1116',

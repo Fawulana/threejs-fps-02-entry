@@ -1,6 +1,7 @@
-// The arsenal: five weapons and a grenade, each with its own price, damage, magazine,
-// cadence and spread, so the buy menu is a real decision. One state machine drives the
-// view model, the magazine, the reload and the muzzle flash; main.js owns the ray.
+// The arsenal: five weapons, each with price, damage, magazine, cadence, spread and
+// wall-penetration ratings, so the buy menu is a real decision. One state machine
+// drives the view model, magazine, reload, muzzle flash and walk bob; main.js owns
+// the ray.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 
@@ -8,27 +9,27 @@ export const WEAPONS = {
   pistol: {
     id: 'pistol', name: 'P9 Sidearm', price: 0, damage: 26, headMult: 2.5, mag: 12, reserve: 48,
     fireGap: 0.16, auto: false, reloadTime: 1.3, spreadStill: 0.003, spreadMove: 0.02,
-    range: 45, pellets: 1, kick: 0.012, barrel: 0.22, zoom: 1.15,
+    range: 45, pellets: 1, kick: 0.012, barrel: 0.22, zoom: 1.15, pen: 0.4,
   },
   rifle: {
     id: 'rifle', name: 'VK-47 Longshot', price: 2700, damage: 34, headMult: 3, mag: 30, reserve: 90,
     fireGap: 0.1, auto: true, reloadTime: 2.1, spreadStill: 0.0022, spreadMove: 0.028,
-    range: 80, pellets: 1, kick: 0.016, barrel: 0.55, zoom: 1.35,
+    range: 80, pellets: 1, kick: 0.016, barrel: 0.55, zoom: 1.35, pen: 1.4,
   },
   smg: {
     id: 'smg', name: 'Hornet-9', price: 1500, damage: 22, headMult: 2.5, mag: 32, reserve: 128,
     fireGap: 0.068, auto: true, reloadTime: 1.7, spreadStill: 0.004, spreadMove: 0.032,
-    range: 40, pellets: 1, kick: 0.01, barrel: 0.34, zoom: 1.2,
+    range: 40, pellets: 1, kick: 0.01, barrel: 0.34, zoom: 1.2, pen: 0.6,
   },
   shotgun: {
     id: 'shotgun', name: 'Breacher-12', price: 1100, damage: 13, headMult: 2, mag: 6, reserve: 24,
     fireGap: 0.85, auto: false, reloadTime: 2.6, spreadStill: 0.012, spreadMove: 0.03,
-    range: 22, pellets: 8, kick: 0.045, barrel: 0.5, zoom: 1.1,
+    range: 22, pellets: 8, kick: 0.045, barrel: 0.5, zoom: 1.1, pen: 0,
   },
   sniper: {
     id: 'sniper', name: 'Longbow .50', price: 4750, damage: 110, headMult: 2.5, mag: 5, reserve: 15,
     fireGap: 1.35, auto: false, reloadTime: 3.1, spreadStill: 0.0004, spreadMove: 0.05,
-    range: 120, pellets: 1, kick: 0.06, barrel: 0.72, zoom: 3.2,
+    range: 120, pellets: 1, kick: 0.06, barrel: 0.72, zoom: 3.2, pen: 2.6,
   },
 };
 
@@ -95,25 +96,31 @@ export function createWeapon(camera) {
   const ownedSet = new Set(['pistol']);
   const state = {
     current: 'pistol', cooldown: 0, reloadLeft: 0, flash: 0, kick: 0, bloom: 0,
-    grenades: 0, flashes: 0, smokes: 0, zoomed: false,
+    grenades: 0, flashes: 0, smokes: 0, zoomed: false, bobPhase: 0,
   };
 
   function activeModel() {
     return models[state.current];
   }
 
-  function step(dt, aiming) {
+  function step(dt, aiming, speed = 0) {
     state.cooldown = Math.max(0, state.cooldown - dt);
-    // Bloom from sustained fire bleeds off over about half a second of not firing,
-    // so burst fire stays accurate and holding the trigger does not.
+    // Bloom from sustained fire bleeds off over ~0.5 s, so burst fire stays
+    // accurate and holding the trigger does not.
     state.bloom = Math.max(0, state.bloom - dt * 0.055);
     state.flash = Math.max(0, state.flash - dt);
     state.kick += (0 - state.kick) * Math.min(1, dt * 14);
     const model = activeModel();
     const def = WEAPONS[state.current];
     const ads = aiming && state.reloadLeft === 0;
-    const targetX = ads ? 0 : 0.24;
-    const targetY = ads ? -0.155 : -0.2;
+    // Walk bob: the view model sways with the stride; aiming damps it so the
+    // sight picture stays readable.
+    state.bobPhase += dt * (2 + speed * 1.7);
+    const bobAmp = ads ? 0.0015 : Math.min(0.011, speed * 0.0021);
+    const bobY = Math.sin(state.bobPhase) * bobAmp;
+    const bobX = Math.cos(state.bobPhase * 0.5) * bobAmp * 0.7;
+    const targetX = (ads ? 0 : 0.24) + bobX;
+    const targetY = (ads ? -0.155 : -0.2) + bobY;
     model.position.x += (targetX - model.position.x) * Math.min(1, dt * 14);
     model.position.y += (targetY - model.position.y) * Math.min(1, dt * 14);
     model.position.z = -0.42 + state.kick;
@@ -163,8 +170,8 @@ export function createWeapon(camera) {
       state.reloadLeft = def.reloadTime;
     },
     spread(speed, crouched, airborne) {
-      // Still and crouched is the accurate stance; moving, jumping and sustained
-      // fire each widen the cone, so stopping to aim pays.
+      // Still and crouched is accurate; moving, jumping and sustained fire widen
+      // the cone, so stopping to aim pays.
       const def = WEAPONS[state.current];
       let value = def.spreadStill + Math.min(1, speed / 5.4) * def.spreadMove + state.bloom;
       if (crouched) value *= 0.7;
@@ -181,8 +188,7 @@ export function createWeapon(camera) {
       return true;
     },
     setModelHidden(hidden) {
-      // Scoped: the view model would fill the scope's circle, so it hides while
-      // the sniper's scope overlay is up and returns the moment it drops.
+      // Scoped: the view model would fill the scope's circle, so it hides.
       models[state.current].visible = !hidden;
     },
     buy(id) {
@@ -197,8 +203,7 @@ export function createWeapon(camera) {
       models[id].visible = true;
     },
     refill() {
-      // A new round tops up the magazines of the weapons the player owns; unowned
-      // weapons stay unowned, and the pistol is always there.
+      // A new round tops up the magazines of owned weapons; the pistol is always there.
       for (const id of ownedSet) {
         ammo[id].mag = WEAPONS[id].mag;
         ammo[id].reserve = WEAPONS[id].reserve;

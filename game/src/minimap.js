@@ -1,10 +1,7 @@
-// The tactical minimap: a top-down view of Foundry Yard in the corner of the HUD.
-// Walls, site letters and spawn marks are painted once onto an offscreen layer; each
-// refresh blits that layer and draws only what moves — the player as a facing arrow,
-// living teammates as teal dots, the bomb as a red diamond once planted, smoke as grey
-// discs, and enemies only while the player has a live line of sight to them, so the map
-// never reveals what the player could not know. Refreshes run four times a second from
-// the fixed-step simulation, never per rendered frame, and draw with no allocation.
+// The tactical minimap: walls, sites and spawns painted once onto an offscreen
+// layer; each refresh blits it and draws only what moves. Enemies appear only while
+// the player has a live line of sight to them, so the map never reveals what the
+// player could not know. Refreshes run four times a second, never per frame.
 export function createMinimap(canvas, world, view) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width;

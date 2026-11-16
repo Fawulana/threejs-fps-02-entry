@@ -1,6 +1,6 @@
-// Synthesised sound, no audio files: every effect is an oscillator or a filtered noise
-// burst built in WebAudio. The context is created on the first user gesture, so the game
-// stays silent (and legal) until the player clicks play. All calls are safe before that.
+// Synthesised sound, no audio files: every effect is an oscillator or a filtered
+// noise burst in WebAudio. The context is created on the first user gesture; all
+// calls are safe before that.
 export function createAudio() {
   let ctx = null;
   let master = null;
